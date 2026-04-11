@@ -68,7 +68,7 @@ module ctrl_unit #(
     // ---- Helper: compute R original addresses and twiddle step ---------------
     // tw_step = (2*bitrev(b_cnt)+1) * delta_idx   (used to address the 2N-entry ROM)
     integer r_idx, bit_idx;
-    reg [LOGN-1:0] b_rev;   // bit-reversed b_cnt truncated to stage_cnt bits
+    reg [LOGN-1:0] b_rev;
     integer rev_bits;
     always @(*) begin
         // Bit-reverse b_cnt over stage_cnt*LOGR bits (b ranges 0..R^s-1).
@@ -133,7 +133,7 @@ module ctrl_unit #(
                         wr_sel    <= 2'b01;
                         ntt_mode  <= 1;
                         pwm_en    <= 0;
-                        bank_we   <= 0;
+                        bank_we   <= {R{1'b1}};
                     end
                 end
 
@@ -217,9 +217,10 @@ module ctrl_unit #(
                         g_cnt     <= 0;
                         b_cnt     <= 0;
                         load_cnt  <= 0;
-                        stage_cnt <= 0;
-                        b_limit   <= 0;        // R^0-1 = 0 at first INTT stage
-                        delta_idx <= N / R;    // DIF INTT: first stage stride = N/R
+                        // Algorithm 5 runs high-radix stages from s=STAGES-1 down to 0.
+                        stage_cnt <= STAGES - 1;
+                        b_limit   <= (N / R) - 1;  // R^(STAGES-1)-1
+                        delta_idx <= 1;            // N / R^(STAGES)
                         rd_sel    <= 2'b01;
                         wr_sel    <= 2'b01;
                         pwm_en    <= 0;
@@ -228,9 +229,9 @@ module ctrl_unit #(
                 end
 
                 // ----------------------------------------------------------
-                // INTT: DIF — stage 0 has delta_idx=N/R, stage STAGES-1 has delta_idx=1
-                // Start at stage 0: delta_idx large, b_limit=0 (b only takes value 0)
-                // Each next stage: delta_idx >>= LOGR, b_limit = (b*R+R-1)
+                // INTT: run stages in descending s order (Algorithm 5, line 17).
+                // stage_cnt starts at STAGES-1 with delta_idx=1 and b_limit=R^(STAGES-1)-1,
+                // then moves toward stage 0 with larger delta_idx and smaller b_limit.
                 INTT: begin
                     bank_we <= {R{1'b1}};
                     if (g_cnt < delta_idx - 1) begin
@@ -241,12 +242,12 @@ module ctrl_unit #(
                             b_cnt <= b_cnt + 1;
                         end else begin
                             b_cnt <= 0;
-                            if (stage_cnt < STAGES - 1) begin
-                                stage_cnt <= stage_cnt + 1;
-                                delta_idx <= delta_idx >> LOGR;   // stride gets smaller each stage
-                                b_limit   <= (b_limit << LOGR) | {LOGR{1'b1}};
+                            if (stage_cnt > 0) begin
+                                stage_cnt <= stage_cnt - 1;
+                                delta_idx <= delta_idx << LOGR;
+                                b_limit   <= b_limit >> LOGR;
                             end else begin
-                                // NTT3 done → go to OUTPUT
+                                // INTT done → go to OUTPUT
                                 state    <= OUTPUT;
                                 load_cnt <= 0;  // use load_cnt to count outputs, not g_cnt
                                 bank_we  <= 0;

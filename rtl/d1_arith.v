@@ -23,25 +23,32 @@ module d1_to_norm #(parameter B = 16) (
 endmodule
 
 // ---- d1_mul_by_2k -----------------------------------------------------------
-// Multiplication by 2^k (k can be positive=left shift / negative=right shift)
-// For Fermat, this is an invert-circular-shift on in[B-1:0].
-// k is given as a 5-bit signed value (for B=16 max shift = 16 bits).
-// If in == 2^B (i.e. D1 zero), output stays 2^B.
-// Left shift by k positions (mod B): out[B-1:0] = {in[B-1-k:0], in[B-1:B-k]}
-// Right shift by k positions (mod B): circular right shift
-// CORRECTION: After circular shift, must add (2^K - 1) for D1 encoding (D1(x*2^k) = shifted(D1(x)) + 2^k - 1)
-// NOTE: k must be in [-(B-1), B-1]; caller is responsible.  
-// For synthesizable constant-shift use: instantiate with a fixed K parameter.
+// Multiplication by 2^k in D1 per Algorithm 3.
+//   k >= 0 : |k|-bit left invert circular shift
+//   k <  0 : |k|-bit right invert circular shift
+// If in == 2^B (D1 zero), output stays 2^B.
 module d1_mul_by_2k #(
-    parameter B  = 16,   // bit width of Fermat number
-    parameter K  = 1     // positive = left shift, negative not used here;
-                         // for inverse (negative k) instantiate with K = B - |k|
+    parameter B  = 16,
+    parameter integer K = 1
 )(
     input  [B:0] in,     // D1 representation
     output [B:0] out     // D1 representation after *2^K
 );
     wire d1_zero = (in == (1'b1 << B));
-    wire [B-1:0] shifted = {in[B-1-K:0], ~in[B-1:B-K]};
+
+    localparam integer KABS = (K < 0) ? -K : K;
+    wire [B-1:0] shifted;
+
+    generate
+        if (KABS == 0) begin : gen_shift_0
+            assign shifted = in[B-1:0];
+        end else if (K > 0) begin : gen_shift_left_inv
+            assign shifted = {in[B-1-KABS:0], ~in[B-1:B-KABS]};
+        end else begin : gen_shift_right_inv
+            assign shifted = {~in[KABS-1:0], in[B-1:KABS]};
+        end
+    endgenerate
+
     assign out = d1_zero ? in : {1'b0, shifted};
 endmodule
 

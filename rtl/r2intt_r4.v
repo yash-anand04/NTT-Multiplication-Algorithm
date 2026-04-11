@@ -53,10 +53,10 @@ module r2intt_r4 #(
     d1_add #(B) add23 (.in1(A2), .in2(A3), .out(sum23));
     d1_sub #(B) sub23 (.in1(A2), .in2(A3), .out(diff23));
 
-    d1_mul_by_2k #(.B(B), .K(B-1)) half01 (.in(sum01),  .out(t0));
-    d1_mul_by_2k #(.B(B), .K(B-1)) half11 (.in(diff01), .out(t1));
-    d1_mul_by_2k #(.B(B), .K(B-1)) half23 (.in(sum23),  .out(t2));
-    d1_mul_by_2k #(.B(B), .K(B-1)) halfd23 (.in(diff23), .out(half_diff23));
+    d1_mul_by_2k #(.B(B), .K(-1)) half01 (.in(sum01),  .out(t0));
+    d1_mul_by_2k #(.B(B), .K(-1)) half11 (.in(diff01), .out(t1));
+    d1_mul_by_2k #(.B(B), .K(-1)) half23 (.in(sum23),  .out(t2));
+    d1_mul_by_2k #(.B(B), .K(-1)) halfd23 (.in(diff23), .out(half_diff23));
     d1_mul_by_2k #(.B(B), .K(KSHIFT_INV)) invw23 (.in(half_diff23), .out(t3));
 
     wire [B:0] sum02, diff02, sum13, diff13;
@@ -67,10 +67,10 @@ module r2intt_r4 #(
     d1_add #(B) add13 (.in1(t1), .in2(t3), .out(sum13));
     d1_sub #(B) sub13 (.in1(t1), .in2(t3), .out(diff13));
 
-    d1_mul_by_2k #(.B(B), .K(B-1)) halfa0 (.in(sum02),  .out(a0_full));
-    d1_mul_by_2k #(.B(B), .K(B-1)) halfa2 (.in(diff02), .out(a2_full));
-    d1_mul_by_2k #(.B(B), .K(B-1)) halfa1 (.in(sum13),  .out(a1_full));
-    d1_mul_by_2k #(.B(B), .K(B-1)) halfa3 (.in(diff13), .out(a3_full));
+    d1_mul_by_2k #(.B(B), .K(-1)) halfa0 (.in(sum02),  .out(a0_full));
+    d1_mul_by_2k #(.B(B), .K(-1)) halfa2 (.in(diff02), .out(a2_full));
+    d1_mul_by_2k #(.B(B), .K(-1)) halfa1 (.in(sum13),  .out(a1_full));
+    d1_mul_by_2k #(.B(B), .K(-1)) halfa3 (.in(diff13), .out(a3_full));
 
     // Rhat mode is currently disabled at top-level control for N=256, R=4.
     assign a0 = a0_full;

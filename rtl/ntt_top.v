@@ -75,72 +75,12 @@ module ntt_top #(
                ST_OUTPUT = 3'd6,
                ST_DONE   = 3'd7;
 
-    localparam MODQ = (1 << B) + 1;
-
     wire is_load   = (fsm_state == ST_LOAD);
     wire is_output = (fsm_state == ST_OUTPUT) || (fsm_state == ST_DONE);
     wire is_ntt    = (fsm_state == ST_NTT1) || (fsm_state == ST_NTT2);
     wire is_intt   = (fsm_state == ST_INTT);
     wire is_pwm    = (fsm_state == ST_PWM);
 
-    // =========================================================================
-    // REFERENCE COMPUTE PATH
-    // A cycle-accurate fallback to guarantee correct polynomial multiplication
-    // output while preserving the existing top-level interface and FSM timing.
-    // =========================================================================
-    reg [WWIDTH-1:0] ref_a [0:N-1];
-    reg [WWIDTH-1:0] ref_b [0:N-1];
-    reg [WWIDTH-1:0] ref_c [0:N-1];
-    reg [2:0]        prev_fsm_state;
-    reg              ref_valid;
-
-    integer ci, cj, ck;
-    integer csum;
-    integer cprod;
-    always @(posedge clk or posedge rst) begin
-        if (rst) begin
-            prev_fsm_state <= ST_IDLE;
-            ref_valid      <= 1'b0;
-        end else begin
-            // Capture streamed input vectors during LOAD.
-            if (is_load) begin
-                ref_a[seq_cnt] <= data_in_a;
-                ref_b[seq_cnt] <= data_in_b;
-                ref_valid      <= 1'b0;
-            end
-
-            // Compute c(x)=a(x)*b(x) mod (x^N+1), mod q once LOAD completes.
-            if ((prev_fsm_state == ST_LOAD) && (fsm_state == ST_NTT1)) begin
-                for (ci = 0; ci < N; ci = ci + 1)
-                    ref_c[ci] = {WWIDTH{1'b0}};
-
-                for (ci = 0; ci < N; ci = ci + 1) begin
-                    for (cj = 0; cj < N; cj = cj + 1) begin
-                        cprod = (ref_a[ci] * ref_b[cj]) % MODQ;
-                        ck = ci + cj;
-                        if (ck >= N)
-                            ck = ck - N;
-
-                        if ((ci + cj) >= N) begin
-                            if (ref_c[ck] >= cprod)
-                                ref_c[ck] = ref_c[ck] - cprod;
-                            else
-                                ref_c[ck] = ref_c[ck] + MODQ - cprod;
-                        end else begin
-                            csum = ref_c[ck] + cprod;
-                            if (csum >= MODQ)
-                                csum = csum - MODQ;
-                            ref_c[ck] = csum[WWIDTH-1:0];
-                        end
-                    end
-                end
-
-                ref_valid <= 1'b1;
-            end
-
-            prev_fsm_state <= fsm_state;
-        end
-    end
 
     // =========================================================================
     // TWIDDLE FACTOR ROM — outputs R parallel factors
@@ -453,7 +393,7 @@ module ntt_top #(
 
     // =========================================================================
     // BANK READ ADDRESS
-    //   NTT/INTT/PWM : from addr_gen (bank_addrs_raw)
+    //   NTT/INTT/PWM : from mapped addresses (Algorithm 7, InterconnectBankAddr)
     //   OUTPUT        : sequential scan, overriding bank_raddr
     // =========================================================================
     wire [R*AWIDTH-1:0]  out_raddr;
@@ -463,8 +403,7 @@ module ntt_top #(
         end
     endgenerate
 
-    // FIX: override read address during output phase (was always bank_addrs_raw before)
-    assign bank_raddr = is_output ? out_raddr : bank_addrs_raw;
+    assign bank_raddr = is_output ? out_raddr : ntt_waddr;
 
     // =========================================================================
     // OUTPUT: serial read from bank seq_bank, lower WWIDTH bits
@@ -478,7 +417,7 @@ module ntt_top #(
                 dout_r = bank_dout[b*DWIDTH +: WWIDTH];
         end
     end
-    assign data_out = ref_valid ? ref_c[seq_cnt] : dout_r;
+    assign data_out = dout_r;
 
 endmodule
 
