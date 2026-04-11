@@ -37,3 +37,21 @@ module twiddle_rom #(
         end
     endgenerate
 endmodule
+
+// Single-entry lookup for stage-specific/custom twiddle exponents.
+module twiddle_lookup #(
+    parameter B        = 16,
+    parameter N        = 256,
+    parameter TW_DEPTH = 2*N,
+    parameter TW_BITS  = $clog2(TW_DEPTH)
+)(
+    input  wire [TW_BITS-1:0] tw_idx,
+    output wire [B:0]         tw_val
+);
+    reg [B:0] tw_mem [0:TW_DEPTH-1];
+    initial begin
+        $readmemh("twiddle_factors.hex", tw_mem);
+    end
+
+    assign tw_val = tw_mem[tw_idx];
+endmodule

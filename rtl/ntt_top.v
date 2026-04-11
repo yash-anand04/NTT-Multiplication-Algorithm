@@ -75,6 +75,24 @@ module ntt_top #(
                ST_OUTPUT = 3'd6,
                ST_DONE   = 3'd7;
 
+    localparam integer STAGES        = LOGN/LOGR;
+    localparam integer R_POW_STAGES  = R ** STAGES;
+    localparam integer RHAT          = (R_POW_STAGES != 0) ? (N / R_POW_STAGES) : 1;
+    localparam integer SUPPORTS_RHAT = (R == 4) && (RHAT == 2);
+    localparam [WWIDTH-1:0] TW_ONE   = {{(WWIDTH-1){1'b0}}, 1'b1};
+
+    function [LOGN-1:0] bit_reverse;
+        input [LOGN-1:0] vin;
+        input integer bits;
+        integer bi;
+        begin
+            bit_reverse = {LOGN{1'b0}};
+            for (bi = 0; bi < LOGN; bi = bi + 1)
+                if (bi < bits)
+                    bit_reverse[bits - 1 - bi] = vin[bi];
+        end
+    endfunction
+
     wire is_load   = (fsm_state == ST_LOAD);
     wire is_output = (fsm_state == ST_OUTPUT) || (fsm_state == ST_DONE);
     wire is_ntt    = (fsm_state == ST_NTT1) || (fsm_state == ST_NTT2);
@@ -85,6 +103,8 @@ module ntt_top #(
     // =========================================================================
     // TWIDDLE FACTOR ROM — outputs R parallel factors
     // =========================================================================
+    localparam TW_BITS = $clog2(2*N);
+
     wire [R*WWIDTH-1:0]  tw_factors;  // R twiddle values: tw_factors[r] for element r
     wire [$clog2(2*N)-1:0] tw_step_inv = ((2 * N) - tw_step) % (2 * N);
     twiddle_rom #(.B(B), .N(N), .R(R)) u_twrom (
@@ -98,6 +118,50 @@ module ntt_top #(
         .tw_step (tw_step_inv),
         .tw_out  (tw_factors_inv)
     );
+
+    // Mixed-radix special-stage twiddles for R4&R2 case:
+    // k=[0,1,2,3] uses factors [1,1,w(step0),w(step1)].
+    wire [LOGN-1:0] rhat_b = SUPPORTS_RHAT ? (orig_addrs[LOGN-1:0] / RHAT) : {LOGN{1'b0}};
+    wire [TW_BITS-1:0] rhat_step0 = SUPPORTS_RHAT ?
+        (((2 * bit_reverse(rhat_b, STAGES * LOGR)) + 1) % (2 * N)) : {TW_BITS{1'b0}};
+    wire [TW_BITS-1:0] rhat_step1 = SUPPORTS_RHAT ?
+        (((2 * bit_reverse(rhat_b + 1'b1, STAGES * LOGR)) + 1) % (2 * N)) : {TW_BITS{1'b0}};
+
+    wire [TW_BITS-1:0] rhat_step0_inv = ((2 * N) - rhat_step0) % (2 * N);
+    wire [TW_BITS-1:0] rhat_step1_inv = ((2 * N) - rhat_step1) % (2 * N);
+
+    wire [WWIDTH-1:0] tw_rhat2, tw_rhat3, tw_rhat2_inv, tw_rhat3_inv;
+    twiddle_lookup #(.B(B), .N(N)) u_tw_lookup_2 (
+        .tw_idx (rhat_step0),
+        .tw_val (tw_rhat2)
+    );
+    twiddle_lookup #(.B(B), .N(N)) u_tw_lookup_3 (
+        .tw_idx (rhat_step1),
+        .tw_val (tw_rhat3)
+    );
+    twiddle_lookup #(.B(B), .N(N)) u_tw_lookup_2_inv (
+        .tw_idx (rhat_step0_inv),
+        .tw_val (tw_rhat2_inv)
+    );
+    twiddle_lookup #(.B(B), .N(N)) u_tw_lookup_3_inv (
+        .tw_idx (rhat_step1_inv),
+        .tw_val (tw_rhat3_inv)
+    );
+
+    wire [R*WWIDTH-1:0] tw_factors_ntt_sel;
+    wire [R*WWIDTH-1:0] tw_factors_intt_sel;
+    generate
+        if (R == 4) begin : gen_tw_select_r4
+            wire [R*WWIDTH-1:0] tw_rhat_pack     = {tw_rhat3,     tw_rhat2,     TW_ONE, TW_ONE};
+            wire [R*WWIDTH-1:0] tw_rhat_pack_inv = {tw_rhat3_inv, tw_rhat2_inv, TW_ONE, TW_ONE};
+
+            assign tw_factors_ntt_sel = (is_Rhat_stage && SUPPORTS_RHAT) ? tw_rhat_pack     : tw_factors;
+            assign tw_factors_intt_sel = (is_Rhat_stage && SUPPORTS_RHAT) ? tw_rhat_pack_inv : tw_factors_inv;
+        end else begin : gen_tw_select_generic
+            assign tw_factors_ntt_sel = tw_factors;
+            assign tw_factors_intt_sel = tw_factors_inv;
+        end
+    endgenerate
 
     // =========================================================================
     // ADDRESS GENERATOR  (used during NTT / INTT / PWM)
@@ -166,6 +230,7 @@ module ntt_top #(
     interconnect_bank_out #(.DWIDTH(DWIDTH), .R(R)) u_icon_out (
         .bank_data_out (bank_dout),
         .iselect       (iselect),
+        .is_Rhat_stage (is_Rhat_stage),
         .operands_out  (operands_out)
     );
 
@@ -195,7 +260,7 @@ module ntt_top #(
                 .clk    (clk),
                 .rst    (rst),
                 .a      (modmul_ntt_in[gi*WWIDTH +: WWIDTH]),
-                .b      (tw_factors[gi*WWIDTH +: WWIDTH]),  // per-element twiddle
+                .b      (tw_factors_ntt_sel[gi*WWIDTH +: WWIDTH]),
                 .result (mm_ntt_out[gi*WWIDTH +: WWIDTH])
             );
         end
@@ -275,7 +340,7 @@ module ntt_top #(
                 .clk    (clk),
                 .rst    (rst),
                 .a      (intt_norm[gi*WWIDTH +: WWIDTH]),
-                .b      (tw_factors_inv[gi*WWIDTH +: WWIDTH]),
+                .b      (tw_factors_intt_sel[gi*WWIDTH +: WWIDTH]),
                 .result (mm_intt_out[gi*WWIDTH +: WWIDTH])
             );
         end
@@ -344,6 +409,7 @@ module ntt_top #(
     interconnect_bank_in #(.DWIDTH(DWIDTH), .R(R)) u_icon_in (
         .operands_in  (bfly_data_pre),
         .iselect      (iselect),
+        .is_Rhat_stage(is_Rhat_stage),
         .bank_data_in (bfly_data_routed)
     );
 
@@ -366,6 +432,7 @@ module ntt_top #(
     interconnect_bank_addr #(.AWIDTH(AWIDTH), .R(R)) u_icon_addr (
         .raw_addrs      (bank_addrs_raw),
         .iselect        (iselect),
+        .is_Rhat_stage  (is_Rhat_stage),
         .selected_addrs (ntt_waddr)
     );
 

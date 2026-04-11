@@ -72,9 +72,22 @@ module r2intt_r4 #(
     d1_mul_by_2k #(.B(B), .K(-1)) halfa1 (.in(sum13),  .out(a1_full));
     d1_mul_by_2k #(.B(B), .K(-1)) halfa3 (.in(diff13), .out(a3_full));
 
-    // Rhat mode is currently disabled at top-level control for N=256, R=4.
-    assign a0 = a0_full;
-    assign a1 = a1_full;
-    assign a2 = a2_full;
-    assign a3 = a3_full;
+    // Mixed-radix (Rhat=2) reuses only the last substage of R2INTT.
+    wire [B:0] sum02_rh, diff02_rh, sum13_rh, diff13_rh;
+    wire [B:0] a0_rh, a1_rh, a2_rh, a3_rh;
+
+    d1_add #(B) add02_rh (.in1(A0), .in2(A2), .out(sum02_rh));
+    d1_sub #(B) sub02_rh (.in1(A0), .in2(A2), .out(diff02_rh));
+    d1_add #(B) add13_rh (.in1(A1), .in2(A3), .out(sum13_rh));
+    d1_sub #(B) sub13_rh (.in1(A1), .in2(A3), .out(diff13_rh));
+
+    d1_mul_by_2k #(.B(B), .K(-1)) halfr0 (.in(sum02_rh),  .out(a0_rh));
+    d1_mul_by_2k #(.B(B), .K(-1)) halfr2 (.in(diff02_rh), .out(a2_rh));
+    d1_mul_by_2k #(.B(B), .K(-1)) halfr1 (.in(sum13_rh),  .out(a1_rh));
+    d1_mul_by_2k #(.B(B), .K(-1)) halfr3 (.in(diff13_rh), .out(a3_rh));
+
+    assign a0 = is_Rhat_stage ? a0_rh : a0_full;
+    assign a1 = is_Rhat_stage ? a1_rh : a1_full;
+    assign a2 = is_Rhat_stage ? a2_rh : a2_full;
+    assign a3 = is_Rhat_stage ? a3_rh : a3_full;
 endmodule
