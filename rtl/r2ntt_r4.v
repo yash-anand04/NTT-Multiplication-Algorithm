@@ -20,7 +20,8 @@
 
 module r2ntt_r4 #(
     parameter B      = 16,  // Fermat Fn = 2^B + 1
-    parameter KSHIFT = 4    // ωR = 2^KSHIFT (e.g., ω_{512}^{128} = 2^4 for N=256, R=4)
+    parameter KSHIFT = 8,   // |ωR| = 2^KSHIFT
+    parameter KNEG   = 1    // ωR sign: 1 => -2^KSHIFT
 )(
     input  [B:0] a0, a1, a2, a3,       // 4 inputs in D1 representation
     input        is_Rhat_stage,         // 1 = only run substage 0 (mixed-radix R^hat=2)
@@ -35,8 +36,8 @@ module r2ntt_r4 #(
     // --- Substage 1: butterfly with twiddle = ωR = 2^KSHIFT ------------------
     wire [B:0] A0_full, A1_full, A2_full, A3_full;
 
-    r2_butterfly #(.B(B), .K(0))      bf2 (.a(t0), .b(t1), .a_out(A0_full), .b_out(A1_full));
-    r2_butterfly #(.B(B), .K(KSHIFT)) bf3 (.a(t2), .b(t3), .a_out(A2_full), .b_out(A3_full));
+    r2_butterfly #(.B(B), .K(0),      .NEG(0))    bf2 (.a(t0), .b(t1), .a_out(A0_full), .b_out(A1_full));
+    r2_butterfly #(.B(B), .K(KSHIFT), .NEG(KNEG)) bf3 (.a(t2), .b(t3), .a_out(A2_full), .b_out(A3_full));
 
     // Output mux: when is_Rhat_stage, only substage 0 is used (R^hat=2 case)
     assign A0 = is_Rhat_stage ? t0 : A0_full;

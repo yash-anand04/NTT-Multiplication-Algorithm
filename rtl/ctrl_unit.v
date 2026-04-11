@@ -35,7 +35,7 @@ module ctrl_unit #(
     // Outputs to data path
     output reg  [R*$clog2(N)-1:0]    orig_addrs,      // R original addresses (R x LOGN bits)
     output reg  [$clog2(2*N)-1:0]    tw_step,          // Twiddle step = (2*bitrev(b)+1)*delta for ROM
-    output reg                        is_Rhat_stage,    // Mixed-radix special stage flag
+    output wire                       is_Rhat_stage,    // Mixed-radix special stage flag
     output reg  [1:0]            rd_sel,           // Read select (which half of banks)
     output reg  [1:0]            wr_sel,           // Write select
     output reg                   ntt_mode,         // 1=NTT butterfly, 0=INTT butterfly
@@ -44,7 +44,6 @@ module ctrl_unit #(
     output reg                   done,
     output wire [2:0]            fsm_state          // Expose FSM state to top
 );
-    assign fsm_state = state;
     // ---- State machine encoding -----------------------------------------------
     localparam IDLE   = 3'd0,
                LOAD   = 3'd1,
@@ -54,6 +53,9 @@ module ctrl_unit #(
                INTT   = 3'd5,
                OUTPUT = 3'd6,
                DONE   = 3'd7;
+
+    assign fsm_state = state;
+    assign is_Rhat_stage = 1'b0;
 
     reg [2:0]           state;
     reg [2:0]           stage_cnt;    // Current stage (0 to STAGES-1)
@@ -67,12 +69,14 @@ module ctrl_unit #(
     // tw_step = (2*bitrev(b_cnt)+1) * delta_idx   (used to address the 2N-entry ROM)
     integer r_idx, bit_idx;
     reg [LOGN-1:0] b_rev;   // bit-reversed b_cnt truncated to stage_cnt bits
+    integer rev_bits;
     always @(*) begin
-        // Bit-reverse b_cnt over (stage_cnt) bits
+        // Bit-reverse b_cnt over stage_cnt*LOGR bits (b ranges 0..R^s-1).
         b_rev = 0;
+        rev_bits = stage_cnt * LOGR;
         for (bit_idx = 0; bit_idx < LOGN; bit_idx = bit_idx + 1) begin
-            if (bit_idx < stage_cnt)
-                b_rev[stage_cnt - 1 - bit_idx] = b_cnt[bit_idx];
+            if (bit_idx < rev_bits)
+                b_rev[rev_bits - 1 - bit_idx] = b_cnt[bit_idx];
         end
         // OrigAddr[r] = b*(delta_idx*R) + g + delta_idx*r
         for (r_idx = 0; r_idx < R; r_idx = r_idx + 1) begin
@@ -93,7 +97,6 @@ module ctrl_unit #(
             b_limit       <= 0;          // R^0 - 1 = 0
             load_cnt      <= 0;
             delta_idx     <= N/R;
-            is_Rhat_stage <= 0;
             rd_sel        <= 2'b00;
             wr_sel        <= 2'b00;
             ntt_mode      <= 1;
@@ -137,7 +140,6 @@ module ctrl_unit #(
                 // ----------------------------------------------------------
                 NTT1: begin
                     bank_we <= {R{1'b1}};
-                    is_Rhat_stage <= (stage_cnt == 0) ? 1'b1 : 1'b0;  // Mixed-radix first stage
                     if (g_cnt < delta_idx - 1) begin
                         g_cnt <= g_cnt + 1;
                     end else begin
@@ -169,7 +171,6 @@ module ctrl_unit #(
                 // ----------------------------------------------------------
                 NTT2: begin
                     bank_we <= {R{1'b1}};
-                    is_Rhat_stage <= 1'b0;  // NTT2 is NOT mixed-radix (always full 4-point)
                     if (g_cnt < delta_idx - 1) begin
                         g_cnt <= g_cnt + 1;
                     end else begin
@@ -232,7 +233,6 @@ module ctrl_unit #(
                 // Each next stage: delta_idx >>= LOGR, b_limit = (b*R+R-1)
                 INTT: begin
                     bank_we <= {R{1'b1}};
-                    is_Rhat_stage <= (stage_cnt == 0) ? 1'b1 : 1'b0;  // Mixed-radix first stage
                     if (g_cnt < delta_idx - 1) begin
                         g_cnt <= g_cnt + 1;
                     end else begin

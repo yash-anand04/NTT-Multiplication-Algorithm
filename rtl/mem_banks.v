@@ -32,9 +32,8 @@ module mem_banks #(
     genvar i;
     generate
         for (i = 0; i < R; i = i + 1) begin : gen_banks
-            // Simple single-port BRAM (write-first mode)
+            // Simple banked memory with synchronous write and combinational read.
             reg [DWIDTH-1:0] mem [0:DEPTH-1];
-            reg [DWIDTH-1:0] dout_r;
 
             always @(posedge clk) begin
                 if (bank_we[i]) begin
@@ -42,11 +41,7 @@ module mem_banks #(
                 end
             end
 
-            always @(posedge clk) begin
-                dout_r <= mem[bank_raddr[i*AWIDTH +: AWIDTH]];
-            end
-
-            assign bank_dout[i*DWIDTH +: DWIDTH] = dout_r;
+            assign bank_dout[i*DWIDTH +: DWIDTH] = mem[bank_raddr[i*AWIDTH +: AWIDTH]];
         end
     endgenerate
 endmodule

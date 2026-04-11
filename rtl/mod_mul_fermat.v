@@ -25,18 +25,20 @@ module mod_mul_fermat #(
     input  wire [B:0]     b,      // normal rep, range [0, 2^B]  (B+1 bits)
     output wire [B:0]     result  // normal rep, range [0, 2^B]
 );
-    // Combinational multiply (need 2*(B+1) bits to hold full product of (B+1)*(B+1))
-    wire [2*B+1:0] product = a * b;
+    // Full product of two (B+1)-bit operands has up to (2B+1) significant bits.
+    // Keep indices [2B:0] so the top meaningful bit at position 2B is preserved.
+    wire [2*B:0] product = a * b;
 
     // Fermat reduction: result = p_low - p_high mod (2^B+1)
     wire [B:0] p_low  = product[B-1:0];          // lower B bits (zero-extended)
-    wire [B:0] p_high = product[2*B-1:B];         // upper B bits
+    wire [B:0] p_high = product[2*B:B];          // floor(product / 2^B), includes bit[2B]
 
-    wire [B+1:0] diff = {1'b0, p_low} - {1'b0, p_high};
+    // Robustly compute (p_low - p_high) mod (2^B + 1) in one normalization step:
+    // t = p_low + q - p_high, where q = 2^B + 1 and 1 <= t <= 2q-2.
+    // Then reduce once: if t >= q -> t-q else t.
+    wire [B+1:0] q_const = (1'b1 << B) + 1'b1;
+    wire [B+1:0] t = {1'b0, p_low} + q_const - {1'b0, p_high};
+    wire [B+1:0] reduced = (t >= q_const) ? (t - q_const) : t;
 
-    wire [B:0] diff_corrected = diff[B+1] ? (diff[B:0] + (1'b1 << B) + 1'b1) :
-                                (diff[B:0] == ((1'b1 << B) + 1)) ? {(B+1){1'b0}} :
-                                diff[B:0];
-
-    assign result = diff_corrected;
+    assign result = reduced[B:0];
 endmodule

@@ -193,6 +193,21 @@ def poly_mul_ntt(a_coeffs, b_coeffs, q=65537, N=256):
     c = intt_reference(C, omega_2N_inv, N)
     return [x % q for x in c]
 
+def poly_mul_direct(a_coeffs, b_coeffs, q=65537, N=256):
+    """Direct negacyclic convolution for c(x)=a(x)*b(x) mod (x^N+1), mod q."""
+    c = [0] * N
+    for i in range(N):
+        ai = a_coeffs[i]
+        for j in range(N):
+            prod = (ai * b_coeffs[j]) % q
+            s = i + j
+            k = s % N
+            if s >= N:
+                c[k] = (c[k] - prod) % q
+            else:
+                c[k] = (c[k] + prod) % q
+    return c
+
 # ---- Generate twiddle factor ROM --------------------------------------
 
 def generate_twiddle_rom(q=65537, N=256):
@@ -221,8 +236,8 @@ if __name__ == "__main__":
     print(f"q = {q}, N = {N}, R = {R}")
     print(f"omega_2N = {get_omega_2N(q, N)}")
 
-    # Compute expected output
-    c_coeffs = poly_mul_ntt(a_coeffs, b_coeffs)
+    # Compute expected output with direct negacyclic convolution.
+    c_coeffs = poly_mul_direct(a_coeffs, b_coeffs)
 
     # Write stimulus and expected output
     with open(os.path.join(sim_dir, "input_a.hex"), "w") as f:

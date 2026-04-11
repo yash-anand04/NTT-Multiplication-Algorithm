@@ -8,23 +8,33 @@
 
 module r2_butterfly #(
     parameter B = 16,   // Fermat number Fn = 2^B + 1
-    parameter K = 0     // twiddle = 2^K (left circular shift by K bits)
+    parameter K = 0,    // twiddle magnitude = 2^K (left circular shift by K bits)
+    parameter NEG = 0   // 1 => twiddle is -2^K
 )(
     input  [B:0] a,         // D1 rep
     input  [B:0] b,         // D1 rep
     output [B:0] a_out,     // D1 rep: a + 2^K*b
     output [B:0] b_out      // D1 rep: a - 2^K*b
 );
-    wire [B:0] tw_b;   // 2^K * b in D1
+    wire [B:0] tw_b_mag;   // 2^K * b in D1
+    wire [B:0] tw_b;       // signed twiddle * b in D1
 
     generate
         if (K == 0) begin : gen_k0
-            assign tw_b = b;  // 2^0 * b = b, circular shift by 0 is identity
+            assign tw_b_mag = b;  // 2^0 * b = b, circular shift by 0 is identity
         end else begin : gen_kn
             d1_mul_by_2k #(.B(B), .K(K)) twiddle_mul (
                 .in  (b),
-                .out (tw_b)
+                .out (tw_b_mag)
             );
+        end
+    endgenerate
+
+    generate
+        if (NEG) begin : gen_neg
+            d1_neg #(B) neg_tw (.in(tw_b_mag), .out(tw_b));
+        end else begin : gen_pos
+            assign tw_b = tw_b_mag;
         end
     endgenerate
 

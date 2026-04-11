@@ -41,11 +41,8 @@ module d1_mul_by_2k #(
     output [B:0] out     // D1 representation after *2^K
 );
     wire d1_zero = (in == (1'b1 << B));
-    wire [B-1:0] shifted = {in[B-1-K:0], in[B-1:B-K]};  // invert circular left shift
-    // D1 correction: after shift, add 2^K - 1 to get proper D1-encoded result
-    localparam [B:0] D1_ADJUST = (1'b1 << K) - 1'b1;
-    wire [B:0] adjusted = {1'b0, shifted} + D1_ADJUST;
-    assign out = d1_zero ? in : adjusted;
+    wire [B-1:0] shifted = {in[B-1-K:0], ~in[B-1:B-K]};
+    assign out = d1_zero ? in : {1'b0, shifted};
 endmodule
 
 // ---- d1_add -----------------------------------------------------------------
