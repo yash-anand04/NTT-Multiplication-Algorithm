@@ -1,0 +1,2252 @@
+IEEE TRANSACTIONS ON COMPUTERS, VOL. 74, NO. 10, OCTOBER 2025
+3519
+High-Radix/Mixed-Radix NTT Multiplication
+Algorithm/Architecture Co-Design
+Over Fermat Modulus
+Yile Xing
+, Student Member, IEEE, Guangyan Li
+, Zewen Ye
+, Student Member, IEEE,
+Ryan W. L. Luk
+, Member, IEEE, Donglong Chen
+, Member, IEEE, Hong Yan
+, Life Fellow, IEEE,
+and Ray C. C. Cheung
+, Senior Member, IEEE
+Abstract—Polynomial multiplication using Number Theoretic
+Transform (NTT) is crucial in lattice-based post-quantum cryp-
+tography (PQC) and fully homomorphic encryption (FHE), with
+modulus q signiﬁcantly affecting performance. Fermat moduli
+of the form 22n + 1, such as 65537, offer efﬁciency gains due
+to simpliﬁed modular reduction and powers-of-2 twiddle factors
+in NTT. While Fermat moduli have been directly applied or
+explored for incorporation into existing schemes, Fermat NTT-
+based polynomial multiplication designs remain underexplored
+in fully exploiting the beneﬁts of Fermat moduli. This work
+presents a high-radix/mixed-radix NTT architecture tailored for
+Fermat moduli, which improves the utilization of the powers-
+of-2 twiddle factors in large transform sizes. In most cases, our
+design achieves a 30%–85% reduction in DSP area-time product
+(ATP) and a 70%–100% reduction in BRAM ATP compared
+to state-of-the-art designs with smaller or equivalent modulus,
+while maintaining competitive LUT and FF ATP, underscoring
+the potential of Fermat NTT-based polynomial multipliers in
+lattice-based cryptography.
+Index
+Terms—Polynomial
+multiplication,
+Fermat
+number
+transform, high radix, mixed radix, conﬂict-free memory access.
+Received 7 October 2024; revised 10 June 2025; accepted 7 July 2025.
+Date of publication 21 July 2025; date of current version 10 September
+2025. This work was supported in part by Hong Kong Innovation and
+Technology Commission (InnoHK Project CIMDA), in part by the CityUHK
+Project under Grant 9440356, in part by ITF Project under Grant ITS/098/22,
+in part by Guangdong Provincial Key Laboratory of IRADS under Grant
+2022B1212010006, in part by Guangdong and Hong Kong Universities
+“1+1+1” Joint Research Collaboration Scheme, in part by Guangdong Basic
+and Applied Basic Research Foundation under Grant 2024A1515011274, in
+part by Guangdong Province General Universities Key Field Project (New
+Generation Information Technology) under Grant 2023ZDZX1033, and in
+part by UIC Research under Grant UICR04202401-21. Recommended for
+acceptance by K. Gaj. (Corresponding author: Donglong Chen.)
+Yile Xing, Guangyan Li, Ryan W. L. Luk, Hong Yan, and Ray C. C.
+Cheung are with the Department of Electrical Engineering, City University
+of Hong Kong, Hong Kong SAR 999077, China (e-mail: ylxing2-c@my.
+cityu.edu.hk; guangyali5-c@my.cityu.edu.hk; ryanluk5-c@my.cityu.edu.hk;
+h.yan@cityu.edu.hk; r.cheung@cityu.edu.hk).
+Zewen Ye is with the College of Information Science & Electronic
+Engineering, Zhejiang University, Hangzhou 310027, China, and also with
+the Department of Electrical Engineering, City University of Hong Kong,
+Hong Kong SAR 999077, China (e-mail: lucas.zw.ye@outlook.com).
+Donglong Chen is with Beijing Normal-Hong Kong Baptist University,
+Zhuhai 519087, China (e-mail: donglongchen@uic.edu.cn).
+Digital Object Identiﬁer 10.1109/TC.2025.3590972
+I. INTRODUCTION
+L
+ATTICE-BASED cryptography offers strong security
+guarantees and efﬁcient arithmetic for both post-quantum
+cryptography (PQC) and fully homomorphic encryption (FHE).
+A key operation in lattice-based schemes is polynomial multi-
+plication based on the number theoretic transform (NTT), which
+plays an important role in overall efﬁciency [1], [2], [3].
+The use of Fermat moduli in NTT offers signiﬁcant ad-
+vantages [4], [5], [6]. Fermat moduli take the form of
+Fn = 2b + 1 = 22n + 1, enabling efﬁcient modular reduction
+via x mod Fn = (xlow −xhigh) mod Fn, where xlow = x
+mod 2b and xhigh =
+
+x/2b
+. Moreover, its modular multipli-
+cations by powers of 2 can be done with shifts alone [7]. Fermat
+number transform (FNT), which refers to an NTT over a Fermat
+modulus, enables the use of power-of-2 twiddle factors, thus re-
+ducing computational complexity. However, the power-of-two-
+based twiddle factors impose a strict constraint N ≤2n+1 on
+the transform size N, which also corresponds to the polynomial
+degree. This limitation makes it challenging to directly support
+many existing parameter sets, as most PQC and FHE schemes
+rely on non-Fermat moduli and large N.
+Currently, a notable scheme that does not face the challenges
+associated with Fermat moduli is Hawk [8], which explicitly
+recommends the Fermat modulus F4 = 65537 in its speciﬁ-
+cation document. Another modulus option in Hawk is 12289.
+Hawk is the only lattice-based candidate in the second round of
+the Additional Digital Signatures for the NIST PQC standard-
+ization process.
+Additionally, although the Dilithium speciﬁcation does not
+recommend a Fermat modulus, Abdulrahman et al. [6] propose
+switching the original large modulus 8380417 to a small Fermat
+modulus 257 for computing the small products cs1 and cs2 in
+Dilithium. The switching results in a speed-up of 33.1%-37.6%
+for the relevant operations (basemul + INTT) of the signing
+procedure on Cortex-M4.
+Most importantly, Kim et al. [4] recently address the chal-
+lenge by proposing a strategy to integrate Fermat moduli into
+the FHE scheme CKKS, which could potentially be extended to
+other similar scenarios involving non-Fermat moduli and very
+large transform sizes. The strategy consists of two key steps:
+0018-9340 © 2025 IEEE. All rights reserved, including rights for text and data mining, and training of artiﬁcial intelligence and similar technologies.
+Personal use is permitted, but republication/redistribution requires IEEE permission. See https://www.ieee.org/publications/rights/index.html for more information.
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+3520
+IEEE TRANSACTIONS ON COMPUTERS, VOL. 74, NO. 10, OCTOBER 2025
+1). Adoption of auxiliary Fermat modulus - After decomposing
+the original a very large modulus Q into small components
+qi using the RNS technique, a sufﬁciently large auxiliary Fer-
+mat modulus is introduced to replace qi. 2). Polynomial Ring
+Transformation - The original large polynomial degree N is
+decomposed into smaller sub-transforms Ni, enabling efﬁcient
+computations using Fermat moduli.
+Developing efﬁcient FNT-based polynomial multiplication in
+hardware is essential not only for supporting existing schemes
+like [8] and methods such as [6], but also for facilitating the
+transition of approach in [4] to other potential schemes. Further-
+more, it encourages more research focused on Fermat modulus-
+based cryptographic schemes, pursuing breakthroughs in high
+efﬁciency from a parameter perspective.
+However, FNT-based polynomial multiplication design re-
+mains insufﬁciently explored. One challenge is how to better
+leverage FNT’s property of powers-of-2 twiddle factors.
+Regarding the transform size constraint N ≤2n+1 for en-
+abling power-of-2 twiddle factors, an optical communication
+work [9], based solely on simulations of a fully unrolled struc-
+ture, demonstrates that high-radix structures can effectively
+utilize power-of-2 twiddle factors even when N > 2n+1. More-
+over, high-radix NTT enables greater parallelism and through-
+put while reducing the number of computation cycles and mem-
+ory accesses, regardless of the chosen modulus. To leverage
+these advantages, we design our FNT-based polynomial mul-
+tiplier using high-radix and mixed-radix architectures, where
+the mixed-radix design speciﬁcally addresses cases where N is
+not a power of the radix R.
+As high-radix designs introduce highly parallel processing,
+they may result in excessive resource consumption and signiﬁ-
+cant frequency degradation when radix R is large. Most exist-
+ing high-radix/mixed-radix designs, primarily based on R2 and
+R4 conﬁgurations over other moduli, have not adequately ad-
+dressed these issues. In the context of Fermat moduli, the chal-
+lenges can be framed as follows: How can multiplications by
+powers-of-2 and those involving the unavoidable non-powers-
+of-2 twiddle factors be efﬁciently handled? Additionally, how
+can resource reuse mechanisms be further optimized? Our work
+goes beyond merely adopting Fermat moduli, it tackles these
+challenges and fully exploits the properties of FNT in ways that
+prior works have not explored.
+A. Related Works
+1) NTT Over Fermat Modulus: Ma et al. [5] propose an
+FPGA implementation of PQC schemes with ﬁxed parameters
+q = 65537 and N = 256. This work adopts a simple R2-NTT
+architecture with a special modular multiplier design. Com-
+bined with D1 representation, the partial products are obtained
+by shifting and using multiplexers, followed by an accumulation
+process to construct the modular multiplier without using DSP.
+This work does not leverage the property that twiddle factors
+in FNT can be powers of 2. Instead, it simply takes advantage
+of the fact that, under the Fermat modulus, multiplication by
+powers of 2 avoids modular reduction operation.
+Works in other ﬁelds [9], [10], [11], [12], [13], [14], [15]
+aim to utilize FNT to achieve a high-accuracy convolution at
+a lower complexity compared to FFT-based methods in their
+areas. Although these works have different applications, the
+techniques combined with FNT are versatile. One important
+technique is the D1 representation, which is usually combined
+with FNT to simplify modular multiplication by a power of 2.
+2) High-Radix/Mixed-Radix NTT Hardware Design:
+In
+cryptographic hardware works, high-radix NTT over general
+moduli has been explored in works [16], [17], [18], [19], [20].
+However, the radix R is subject to two limitations in these
+works. First, R is typically limited to 4. Due to the complicated
+NTT/INTT butterﬂy operations, more datapaths and intercon-
+nect networks [16], [20], higher radix will dramatically increase
+the resource usage. Second, R is usually constrained to be a
+factor of N, limiting the conﬁguration ﬂexibility.
+Duong-Ngoc and Lee [21] propose an R4&R2 mixed-radix
+NTT architecture which can break the second limitation. How-
+ever, the design does not reuse R2 and R4 butterﬂy units in each
+stage, leading to substantial resource usage.
+Li et al. [22], Guo and Li [23] explore the split-radix NTT,
+which has a lower theoretical complexity than R4 NTT. How-
+ever, the asymmetry of the split-radix butterﬂy complicates
+the implementation, and the algorithm cannot fully exploit its
+theoretical advantages in pipelined hardware implementations.
+Many works explore designs with multiple butterﬂy units in
+parallel [16], [17], [24], [25], [26]. Generally, by applying the
+m×radix-R (m, R ≥2) butterﬂy style instead of 1*R2 style, the
+ideal cycles is reduced from O( N
+2 log N) to O( N
+Rm logR N).
+However, it has been shown that an NTT kernel with multiple
+R2 butterﬂy units is less efﬁcient than an R4 NTT kernel [16].
+Therefore, a uniﬁed mixed-radix architecture that can sup-
+port large radix-R as well as more N is a promising research
+direction to improve efﬁciency.
+As for the conﬂict-free memory mapping for the temporary
+data, Zhang et al. [24] propose a 2*R2 design and supports 4
+data in parallel but require 8 address generators to determine
+the reading and writing addresses. Chen et al. [16] reduce the
+number of address generators by half and insert registers to get
+writing addresses from reading addresses.
+B. Major Contributions
+This paper proposes a polynomial multiplier based on high-
+radix/mixed-radix FNT. The main contributions are as follows:
+• We propose high-radix and mixed-radix NTT/INTT with
+merged pre-/post-processing algorithms. Speciﬁcally, the
+transform processes are modularized, ensuring that D1
+representation is employed for concentrated multiplica-
+tions by power-of-2 constants in R2NTT/R2INTT module,
+while retaining the beneﬁts of normal representation for
+multiplications by normal numbers in ModMuls module.
+This modularization also facilitates PWM calculations and
+supports complete polynomial multiplication.
+• We introduce a low-complexity conﬂict-free memory map-
+ping scheme and extend it to support mixed-radix oper-
+ations. This method reduces the complexity of memory
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+XING et al.: HIGH-RADIX/MIXED-RADIX NTT MULTIPLICATION ALGORITHM/ARCHITECTURE CO-DESIGN
+3521
+mapping and improves frequency and efﬁciency in high-
+radix cases by requiring only one bank index as the select
+signal for memory mapping interconnections.
+• We propose a polynomial multiplication architecture based
+on FNT, conﬁgurable to a broader range of degree N and
+radix R conﬁgurations. The architecture accommodates
+radix R = 4, 8, 16 and their mixed combinations, provid-
+ing ﬂexibility to meet varying latency and area constraints
+with high efﬁciency. The architecture allows small-radix
+stages to reuse the R2NTT, R2INTT and ModMul modules
+from large-radix stages.
+• Our implementation shows that the R8 and R16 conﬁgu-
+rations offer comparable or better efﬁciency than the R4
+conﬁguration. In most cases, our design achieves a 30%–
+85% reduction in DSP ATP and a 70%–100% reduction
+in BRAM ATP compared to state-of-the-art designs with
+smaller or equivalent modulus, while maintaining compet-
+itive LUT and FF ATP.
+II. PRELIMINARY
+A. NTT-Based Polynomial Multiplication
+NTT is generally a Discrete Fourier Transform (DFT) over a
+ﬁnite ﬁeld Zq = Z/qZ. NTT and its inverse transform (INTT)
+are deﬁned as:
+Ak = NTTN(a)k =
+N−1
+
+n=0
+anωnk
+N mod q, k = 0, 1, . . . , N −1
+an = INTTN(A)n = N −1
+N−1
+
+k=0
+Akω−nk
+N
+mod q,
+n = 0, . . . , N −1
+where ωN is a primitive N-th root of unit in Zq, i.e., ωN
+N ≡1
+(mod q) and ωi
+N ̸≡1 (mod q) for any i = 1, ..., N −1. NTT
+also has the circular convolution property analogous to DFT.
+Similar to the Fast Fourier transfor (FFT) for DFT, NTT sup-
+ports a divide-and-conquer method to reduce the computational
+complexity from O(N 2) to O(N log N). An iterative R2 DIT-
+NTTNR algorithm and DIF-INTTRN algorithm are provided in
+Algorithms 1 and 2 respectively.
+In lattic-based PQC schemes, the polynomial is mainly de-
+ﬁned over the ring Zq[x]/⟨xN + 1⟩. Suppose two polynomials
+a(x) = N−1
+n=0 anxn and b(x) = N−1
+n=0 bnxn, the polynomial
+multiplication can be performed with the negative wrapped con-
+volution method based on NTT. The coefﬁcients of the product
+a(x)b(x) = N−1
+n=0 cnxn can be expressed by:
+cn = (INTTN(NTTN(an · ωn
+2N)⊙NTTN(bn · ωn
+2N)))n·ω−n
+2N
+where ω2N is a primitive (2N)th root of unit in Zq, thereby
+ωN ≡ω2
+2N (mod q). The point-wise multiplication inside
+NTTs and outside INTT are called pre-processing and post-
+processing respectively.
+Researchers make efforts to simplify the negative weighted
+convolution by improving the FFT-like structure in NTT/INTT.
+The works successfully eliminates the pre-processing [27], the
+post-processing [28], the scaling factor N −1 [24] and also the
+Algorithm 1: R2NTT: Radix-2 DIT-NTTNR
+Input : A vector a of length N, modulus q, N-th
+primitive root of unity ωN in Zq.
+Output: Output vector A.
+1 for s ←0 to log(N) −1 do
+2
+M ←2s+1;
+3
+ωM ←ωN/M
+N
+mod q;
+4
+Δidx ←N/2s+1;
+5
+for b ←0 to 2s −1 do
+6
+ω ←ωbit-rev(b)
+M
+mod q;
+7
+for g ←0 to N/2s+1 −1 do
+8
+idx ←b · N/2s + g;
+9
+T ←ω · aidx+Δidx mod q;
+10
+aidx+Δidx ←aidx −T
+mod q;
+11
+aidx ←aidx + T
+mod q;
+12 A ←a;
+Algorithm 2: R2INTT: Radix-2 DIF-INTTRN
+Input : A vector A of length N, modulus q, inversion
+of a N-th primitive root of unity ω−1
+N in Zq.
+Output: Output vector a.
+1 for s ←log(N) −1 to 0 do
+2
+M ←2s+1;
+3
+ω−1
+M ←(ω−1
+N )N/M mod q;
+4
+Δidx ←N/2s+1;
+5
+for b ←0 to 2s −1 do
+6
+ω−1 ←(ω−1
+M )bit-rev(b) mod q;
+7
+for g ←0 to N/2s+1 −1 do
+8
+idx ←b · N/2s + g;
+9
+T ←2−1(Aidx + Aidx+Δidx) mod q;
+10
+Aidx+Δidx ←2−1ω−1(Aidx −Aidx+Δidx) mod q;
+11
+Aidx ←T;
+12 a ←A;
+bit-reverse operation before NTT and after INTT [16], which
+contribute to a scramble-free FFT-like structure for NTT/INTT
+with ω±n
+2N and N −1 merged in each stage.
+B. NTT Over Fermat Modulus and Diminished-1
+Representation
+NTT over Fermat number modulus, i.e., q = Fn = 2b + 1 =
+22n + 1, is known as the Fermat number transform (FNT) [29],
+which enables shifting operations to replace multiplications in-
+side transforms when applying the power-of-2 twiddle factors.
+This property highly depends on the relationship between q
+and N. Table I lists two commonly used modulus F3 and F4,
+their corresponding root of unity ωN and the degree N. For
+commonly used Fermat modulus F2 to F6, the twiddle factors
+are all a power of 2 when N ≤2n+1 [29].
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+3522
+IEEE TRANSACTIONS ON COMPUTERS, VOL. 74, NO. 10, OCTOBER 2025
+TABLE I
+THE ROOT OF UNITY ωN FOR DIFFERENT N IN FNT
+Fn
+ω2
+ω4
+ω8
+ω16
+ω32
+ω64
+ω128
+ω256
+...
+ω65536
+F3 = 257
+28
+24
+22
+2
+2
+1
+2
+2
+1
+4
+2
+1
+8
+2
+1
+16
+F4 = 65537
+216
+28
+24
+22
+2
+2
+1
+2
+2
+1
+4
+2
+1
+8
+...
+2
+1
+4096
+Algorithm 3: Arithmetics Operations in Diminished-1
+Norm_to_D1(in)
+if in == 0 then
+out ←2b;
+else
+out ←in −1;
+return out
+D1_to_Norm(in)
+if in == 2b then
+out ←0;
+else
+out ←in + 1;
+return out
+Mul_by_2k(k, in)
+if in == 2b then
+out ←in;
+else
+if k ≥0 then
+out ←|k|-bit left invert circular shift for in[b −1 : 0]
+else
+out ←|k|-bit right invert circular shift for in[b −1 : 0]
+return out
+Addition(in1, in2)
+if in1 == 2b then
+out ←in2;
+else if in2 == 2b then
+out ←in1;
+else
+out ←in1 + in2;
+out ←out[b −1 : 0]+ ∼out[b];
+return out
+Negation(in)
+if in == 2b then
+out ←2b;
+else
+out ←{1′b0, ∼in[b −1 : 0]};
+return out
+Considering b + 1 bits is required for representing all the pos-
+sible results for Fermat number Fn = 2b + 1, our work does not
+use only b bits to represent data or ignore the number 2b as [29].
+It is because we would like to avoid a highly improbable but
+plausible chance of the polynomial coefﬁcients being affected
+by errors when the value −1 occurs during NTT computation.
+Instead, we follow [7] to apply D1 representation, which repre-
+sents the original number x as x −1. b bits are used to represent
+numbers from 1 to 2b, while an extra bit is used to represent
+0. For example, with modulus F2 = 17 = 10001B, the number
+from 00001B to 10000B in normal binary representation is
+represented as 00000B to 01111B in D1 respectively, while
+the number 00000B is represented as 10000B.
+The computations about D1 are listed in Algorithm 3. The
+bit-width of inputs and outputs are b + 1. The utilization of
+D1 reduces modular multiplication by constant powers of 2 to
+approximately a circular shift.
+C. Memory Access Conﬂicts
+Scalability across varying numbers of parallel butterﬂy units
+and different radices is essential for managing parallelism
+and optimizing the throughput rate in polynomial multiplica-
+tion. Two main memory access strategies exist for NTT archi-
+tectures: constant-geometry NTT and in-place NTT. In con-
+stant geometry NTT, as adopted by [31], [32], butterﬂy in-
+puts and outputs are stored separate memory banks, with a
+ping-pong buffering scheme managing data ﬂow. This struc-
+ture inherently avoids read-the-same-bank (RSB) conﬂicts but
+still requires mechanisms to handle read-after-write (RAW)
+conﬂicts. To eliminate redundant storage, some works, such
+as [16], [17], [24], [30], [33], favor in-place NTT, where
+temporary data are read from and written to the same ad-
+dresses within the banks. This approach requires addressing
+both RSB and RAW conﬂicts, which we also tackle in our
+design.
+RSB conﬂict occurs when different data points in the same
+bank are required in the same cycle. [30], [33] propose a similar
+compact memory scheme to avoid the RSB conﬂict. Assuming
+there are R banks for the temporary data, the mapped bank
+index and address for each data point with an original address
+are as follows:
+OrigAddr = blog N−1...... b2 log R−1 . . . blog R
+
+
+	
+log R bits
+blog R−1 . . . b0
+
+
+	
+log R bits
+,
+BankIndex =
+⌈log N
+log R ⌉−1
+
+i=0
+OrigAddr[(log R)
+· (i + 1) : (log R)i] mod R,
+BankAddr = blog N−1 . . . . . . b2 log R−1 . . . blog R.
+A 4-bank memory mapping is shown in Fig. 1(a). Zhang et al.
+[24] note that this method still encounters an RSB conﬂict in
+one stage of a 2*R2 design, as illustrated in Fig. 1(b), and they
+handle this stage speciﬁcally. This design supports 4 operations
+in parallel but requires 8 address generators to determine the
+bank indexes for reading and writing. Chen et al. [16] and
+Mu et al. [17] address this by new schemes with increased
+complexity. Chen et al. [16] reduce the number of address gen-
+erators by half and inserts registers to get writing addresses from
+reading addresses. Fortunately, the original scheme introduces
+no RSB conﬂict when there is only one radix-R butterﬂy unit.
+Our design further reduces the address generator to only 1,
+minimizing logic and register usage.
+RAW conﬂict occurs when the data is fetched again before
+it completes the pipeline of the previous stage, as shown in
+Fig. 1(c). The cycles between reading and storage should be
+less or equal to the minimum cycles between fetching the same
+data points, i.e.,
+N
+mR2 , in an m*radix-R design.
+This type of conﬂict is usually not a concern in most works
+where N is large or R is small. However, it is very likely to
+happen in high-radix designs. Mu et al. [17] pursue a fully-
+pipelined design, sacriﬁcing many choices of R when RAW
+conﬂict happens. Our design simply inserts stalls to avoid RAW
+conﬂict as Fig. 1(d). The added cycles and the registers con-
+sumption due to stalls are acceptable compared to the gaining
+from high radix, especially when N is relatively large.
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+XING et al.: HIGH-RADIX/MIXED-RADIX NTT MULTIPLICATION ALGORITHM/ARCHITECTURE CO-DESIGN
+3523
+(a)
+(b)
+(c)
+(d)
+Fig. 1.
+Two types of conﬂict. The bank indexes are indicated by different colors. (a): 4-bank memory mapping by [30] (≤64 points). (b): A read-the-same-
+bank (RSB) conﬂict example in 16-points 2*R2 design. {a4, a1}, {a6, a3}, {a12, a9} and {a14, a11} are required at the same cycle but located in the same
+bank. (c): A read-after-write (RAW) conﬂict example in 16-point 1*R4 design. a3 is read again in stage 2 before its result from stage 0 is written into the
+bank. (d): Inserting stalls to delay the writing operations thereby avoiding RAW conﬂict.
+III. HIGH-RADIX/MIXED-RADIX NTT AND INTT
+Building upon the derivation ideas from [16], [34], we pro-
+vide a detailed derivation of high-radix DIT-NTT and DIF-
+INTT with pre/post-processing. Furthermore, we extend the
+discussion by proposing our high-radix/mixed-radix algorithms
+speciﬁcally tailored for FNT and its inverse transform.
+A. High-Radix DIT-NTT With Merged Pre-Processing
+The radix-R length-N DIT-NTT with merged pre-processing
+can be obtained by
+Ak =
+N−1
+
+n=0
+anωn
+2Nωkn
+N mod q
+=
+N
+R −1
+
+i=0
+aRiω(2k+1)(Ri)
+2N
++
+N
+R −1
+
+i=0
+aRi+1ω(2k+1)(Ri+1)
+2N
++ . . . +
+N
+R −1
+
+i=0
+aRi+R−1ω(2k+1)(Ri+R−1)
+2N
+mod q
+=
+N
+R −1
+
+i=0
+aRiω(2k+1)(Ri)
+2N
++ ω(2k+1)
+2N
+N
+R −1
+
+i=0
+aRi+1ω(2k+1)(Ri)
+2N
++ . . . + ω(R−1)(2k+1)
+2N
+N
+R −1
+
+i=0
+aRi+R−1ω(2k+1)(Ri)
+2N
+mod q.
+By denoting {aRi+r} as {si,r}, the above equation can be
+written as
+Ak =
+N
+R −1
+
+i=0
+si,0ω(2k+1)i
+2N
+R
++ ω(2k+1)
+2N
+N
+R −1
+
+i=0
+si,1ω(2k+1)i
+2N
+R
++ . . . + ω(R−1)(2k+1)
+2N
+N
+R −1
+
+i=0
+si,R−1ω(2k+1)i
+2N
+R
+mod q
+=
+R−1
+
+r=0
+ωr(2k+1)
+2N
+N
+R −1
+
+i=0
+si,rω(2k+1)i
+2N
+R
+mod q,
+where k = 0, ..., N −1. Due to the periodicity, it can be further
+expressed as
+Al+ N
+R j =
+R−1
+
+r=0
+ω
+r(2(l+ N
+R j)+1)
+2N
+N
+R −1
+
+i=0
+si,rω
+(2(l+ N
+R j)+1)i
+2N
+R
+mod q
+=
+R−1
+
+r=0
+ωrj
+R ωr(2l+1)
+2N
+N
+R −1
+
+i=0
+si,rω(2l+1)i
+2N
+R
+mod q,
+where l = 0, ..., N
+R −1, j = 0, ..., R −1. The steps of NTT with
+merged pre-processing can be summarized as:
+1) Derive
+R
+N
+R -point
+NTT
+with
+merged
+pre-
+processing
+
+Sl,r|l = 0, ..., N
+R −1
+
+(r = 0, ..., R −1)
+of
+
+si,r|i = 0, ..., N
+R −1
+
+(r = 0, ..., R −1)
+from
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+3524
+IEEE TRANSACTIONS ON COMPUTERS, VOL. 74, NO. 10, OCTOBER 2025
+{an|n = 0, ..., N} as Eqs. 1 and 2.
+Sl,r =
+N
+R −1
+
+i=0
+si,rω(2l+1)i
+2N
+R
+mod q,
+(1)
+si,r = aRi+r = an.
+(2)
+2) Derive {ˆsl,r} by multiplying
+
+Sl,r
+
+from Step 1 by
+ωr(2l+1)
+2N
+as Eq. 3:
+ˆsl,r = Sl,rωr(2l+1)
+2N
+mod q,
+(3)
+3) Compute N
+R R-point NTT
+
+ˆSl,j|j = 0, ..., R −1
+
+(l =
+0, ..., N
+R −1) of {ˆsl,r|r = 0, ..., R −1} (l = 0, ..., N
+R −
+1) from Step 2 as Eq. 4.
+ˆSl,j =
+R−1
+
+r=0
+ˆsl,rωrj
+R mod q,
+(4)
+where ωR = ω
+2N
+R
+2N mod q. The ﬁnal result can be obtained
+by Eq. 5:
+Ak = Al+ N
+R j = ˆSl,j.
+(5)
+Fig. 2(a) demonstrates the symbols’ relationship. Step 3 can be
+performed by unroll R2NTT as Algorithm 1. For q = Fn and
+R ≤2n+1, Step 3 requires no multiplications, only shifts, since
+ωR is a power of 2, as discussed in Section II-B. By recursively
+decomposing Step 1 with radix R, the computation complexity
+can be reduced from O(N 2) to O(N logR N).
+Additionally, one key conﬁguration is to maintain ωR as the
+same ω
+2N
+R
+2N from the original size N and ω2N throughout the
+decomposition. This ensures that twiddle factors remain un-
+changed across different R-point NTTs, allowing for the design
+of one ﬁxed R-point NTT module. The upper part of Fig. 2(b)
+shows the ﬂow of a high-radix NTT with pre-processing, which
+alternates between multiplications and NTTs. The left part of
+Fig. 3(a) show an R16 NTT butterﬂy. In this way, for a Fer-
+mat modulus, a NTT with merged pre-processing can lever-
+age power-of-2 constant multiplications without the constraint
+N < 2n+1, only requiring R ≤2n+1.
+B. High-Radix DIF-INTT With Merged Post-Processing
+The radix-R
+length-N
+DIF-INTT with merged post-
+processing can be obtained by
+an = N −1ω−n
+2N
+N−1
+
+k=0
+Akω−kn
+N
+mod q
+= N −1ω−n
+2N
+ N
+R −1
+
+l=0
+Alω−ln
+N
++
+N
+R −1
+
+l=0
+Al+ N
+R ω
+−(l+ N
+R )n
+N
++
+N
+R −1
+
+l=0
+Al+ 2N
+R ω
+−(l+ 2N
+R )n
+N
++ ...
++
+N
+R −1
+
+l=0
+Al+ (R−1)N
+R
+ω
+−(l+ (R−1)N
+R
+)n
+N
+
+mod q
+Fig. 2.
+The ﬂow of high-radix/mixed-radix NTT/INTT with pre/post-
+processing.
+= N −1ω−n
+2N
+N
+R −1
+
+l=0
+R−1
+
+j=0
+(Al+ jN
+R ω−jn
+R
+)ω−ln
+N
+mod q.
+By denoting {Al+ N
+R j} as { ˆSl,j}, it can be written as
+an =
+N
+R
+−1
+ω−n
+2N
+N
+R −1
+
+l=0
+⎛
+⎝R−1
+R−1
+
+j=0
+ˆSl,jω−jn
+R
+⎞
+⎠ω−ln
+N
+mod q,
+where k = 0, ..., N −1. Due to the periodicity, it can be further
+expressed as
+aRi+r =
+N
+R
+−1
+ω−(Ri+r)
+2N
+N
+R −1
+
+l=0
+
+R−1
+R−1
+
+j=0
+( ˆSl,jω−j(Ri+r)
+R
+)
+· ω−l(Ri+r)
+N
+
+mod q
+=
+N
+R
+−1
+ω−i
+2N
+R
+N
+R −1
+
+l=0
+
+R−1
+R−1
+
+j=0
+ˆSl,jω−jr
+R
+
+· ω−(2l+1)r
+2N
+
+· ω−li
+N
+R
+
+mod q,
+where i = 0, ..., N
+R −1, r = 0, ..., R −1. The steps of INTT
+with merged post-processing can be summarized as:
+1) Compute N
+R R-point INTT {ˆsl,r|r = 0, ..., R −1} (l =
+0, ..., N
+R −1) of
+
+ˆSl,j|j = 0, ..., R −1
+
+(l = 0, ..., N
+R −
+1) from
+
+Ak|k = 0, ..., N
+
+as Eqs. 6 and 7 as
+ˆsl,r = R−1
+R−1
+
+j=0
+ˆSl,jω−jr
+R
+mod q,
+(6)
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+XING et al.: HIGH-RADIX/MIXED-RADIX NTT MULTIPLICATION ALGORITHM/ARCHITECTURE CO-DESIGN
+3525
+Fig. 3.
+R16 butterﬂy units are applied to R16 cases and R4 cases.
+where ωR = ω
+2N
+R
+2N mod q.
+ˆSl,j = Al+ N
+R j = Ak,
+(7)
+2) Derive
+
+Sl,r
+
+by multiplying {ˆsl,r} from Step 1 by
+ω−(2l+1)r
+2N
+as Eq. 8:
+Sl,r = ˆsl,rω−(2l+1)r
+2N
+mod q.
+(8)
+3) Derive
+R
+N
+R -point
+INTT
+with
+merged
+post-
+processing
+
+si,r|i = 0, ..., N
+R −1
+
+(r = 0, ..., R −1) of
+
+Sl,r|l = 0, ..., N
+R −1
+
+(r = 0, ..., R −1) from Step 2
+as Eqs. 9 and 10.
+si,r =
+N
+R
+−1
+ω−i
+2N
+R
+N
+R −1
+
+l=0
+Sl,rω−li
+N
+R mod q,
+(9)
+an = aRi+r = si,r,
+(10)
+Fig. 2(a) demonstrates the symbols relationship. Step 1 can
+be performed by an unroll R2INTT as Algorithm 2. For q = Fn
+and R ≤2n+1, Step 1 consumes no multiplications, only shifts,
+since ω−1
+R
+is a power of 2, as discussed in Section II-B. By
+recursively decomposing Step 3 with radix R, the computation
+complexity can be reduced from O(N 2) to O(N logR N).
+Additionally, one key conﬁguration is to maintain ω−1
+R
+as
+the same ω
+2N
+R
+2N from the original size N and ω2N throughout
+the decomposition. This ensures that twiddle factors remain
+unchanged across different R-point INTTs, allowing for the
+design of one ﬁxed R-point INTT module. The lower part
+of Fig. 2(b) shows the ﬂow of a high-radix INTT with post-
+processing, which alternates between INTTs and modular mul-
+tiplications. The left part of Fig. 3(b) show an R16 INTT
+butterﬂy.
+In this way, for a Fermat modulus, an INTT with merged
+post-processing can leverage power-of-2 constant multipli-
+cations without the constraint N < 2n+1, only requiring
+R ≤2n+1.
+C. Proposed High-Radix/Mixed-Radix Algorithms for
+DIT-NTT and DIF-INTT
+In this subsection, we propose an improved iterative algo-
+rithms for high-radix and mixed-radix NTT and INTT. The iter-
+ative algorithms for high-radix/mixed-radix NTT with merged
+pre-processing and INTT with merged post-processing are de-
+tailed in Algorithms 4 and 5, respectively. To clarify, in this pa-
+per, one complete process of ModMuls and an R2NTT/R2INTT
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+3526
+IEEE TRANSACTIONS ON COMPUTERS, VOL. 74, NO. 10, OCTOBER 2025
+Algorithm 4: High-radix/Mixed-radix NTTNR with merged pre-processing
+Input : A vector a of length N, modulus q, 2N-th primitive root of unity ω2N in Zq, radix R.
+Output: Output vector A.
+1 ωR ←ω2N/R
+2N
+;
+2 for s ←0 to ⌊log(N)/log(R)⌋−1 do
+3
+M ←Rs+1;
+4
+ω2M ←ωN/M
+2N
+mod q;
+5
+Δidx ←N/Rs+1;
+6
+for b ←0 to Rs −1 do
+7
+for g ←0 to N/Rs+1 −1 do
+8
+idx ←b · N/Rs + g;
+// unroll from line 9 to 14
+9
+for r ←0 to R −1 do
+10
+Tr ←aidx+Δidx·r · ωr·(2·bit-rev(b)+1)
+2M
+mod q
+// ModMul
+11
+Tr ←Norm_to_D1(Tr);
+12
+T ←R2NTT(T, R, q, ωR)
+13
+for r ←0 to R −1 do
+14
+aidx+Δidx·r ←D1_to_Norm(Tr);
+15 s ←s + 1;
+16 if s ̸= log(N)/log(R) then
+17
+ˆR ←N/Rs;
+18
+ω2M ←ω2N;
+19
+for b ←0 to Rs −1by R/ ˆR do
+20
+idx ←b · ˆR;
+// unroll from line 20 to 27
+21
+for r1 ←0 to ˆR −1 do
+22
+for r2 ←0 to R
+ˆ
+R −1 do
+23
+Tr1· R
+ˆ
+R +r2 ←aidx+r1+r2· ˆ
+R · ωr1·(2·bit-rev(b+r2)+1)
+2M
+modq // ModMul
+24
+Tr1· R
+ˆ
+R +r2 ←Norm_to_D1(Tr1· R
+ˆ
+R +r2);
+25
+T ←The ﬁrst log ˆR substages of R2NTT(T, R, q, ωR);
+// Algorithm 1 with line 1 having s from
+0 to log ˆR −1
+26
+for r1 ←0 to ˆR −1 do
+27
+for r2 ←0 to R
+ˆ
+R −1 do
+28
+aidx+r1+r2· ˆ
+R ←D1_to_Norm(Tr1· R
+ˆ
+R +r2);
+29 A ←a;
+is called a ‘stage’, while a single layer of R2 butterﬂy operations
+within the R2NTT is termed a ‘substage’. Our optimization can
+be captured in three main points.
+• First, we maximize the concentration of power-of-2
+constant multiplications into the ﬁxed R2NTT and
+R2INTT using high-radix methods.
+By setting q = Fn and R ≤2n+1, all the twiddle factors
+in R2NTT/R2INTT are powers of 2 because ωR is a power
+of 2 as discussed in Section II-B. The R2NTT/R2INTT is
+static in different stages due to a ﬁxed ωR. It is important
+to note that there can be multiple R-th roots of unity or
+N-th roots of unity in Zq. However, ωR must be ω2N/R
+2N
+for the selected ω2N to ensure correctness.
+In other designs, although many twiddle factors are
+powers of 2 at various stages (especially ω0 = 1), these
+twiddle factors are not ﬁxed in the butterﬂy module, requir-
+ing ﬂexible multipliers to handle different twiddle factors.
+In contrast, our algorithm separates static power-of-
+2 multiplications in R2NTT/R2INTT and dynamic non-
+power-of-2 multiplications in ModMuls. This allows spe-
+ciﬁc constant processing to be applied to R2NTT/R2INTT,
+and the ModMuls hardware can be reused for PWM be-
+tween NTT and INTT.
+• Second, we reuse the R-point R2NTT and R2INTT
+for the special radix- ˆR stage in mixed-radix cases.
+To address cases where R is not a root of N, we propose
+a mixed-radix approach by applying a radix- ˆR stage at the
+end of NTT and the beginning of INTT, as illustrated in
+Fig. 2(c). Fig. 3(a) and 3(b) demonstrate how to extract
+four R4 butterﬂy unit from an R16 unit in NTT and INTT,
+respectively. The ModMuls is fully reused, while the ﬁrst
+log ˆR substages of radix-R R2NTT and the last log ˆR sub-
+stages of radix-R R2INTT are reused to construct radix- ˆR
+R2NTT and R2INTT respectively.
+• Third, we strategically apply D1 representation in
+R2NTT and R2INTT and normal representation in
+ModMuls.
+The D1 representation exhibits varying levels of efﬁ-
+ciency for different arithmetic operations in ZFn, as il-
+lustrated in Algorithm 3. Modular multiplications by a
+power of 2 beneﬁt the most, requiring only circular shift-
+ing. Modular addition offers neither signiﬁcant beneﬁts
+nor disadvantages, while modular subtraction is similar to
+addition since it can be treated as a negation followed by
+a modular addition.
+However,
+modular
+multiplication
+by
+non-power-
+of-2 numbers in D1 is more complex. The direct
+computation
+is
+illustrated
+as
+D1(x · ω) mod q =
+x · ω −1 mod q = (x −1) · (ω −1) + x + ω −2
+mod q = D1(x) · D1(ω) + D1(x) + D1(ω) mod q.
+Instead, [5] computes normal multiplication by computing
+the partial products 2ix[i] · ω with D1, followed by
+accumulation in D1. While this method leverages the
+beneﬁts of D1, it sacriﬁces DSP utilization in FPGA.
+Applying this method in high-radix cases would lead to
+signiﬁcant consumption of LUTs and FFs, along with
+potential frequency degradation due to complex routing.
+Therefore, we choose to apply D1 representation in the
+R2NTT/R2INTT, which involves modular multiplications
+by power-of-2 constants, modular additions and modular
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+XING et al.: HIGH-RADIX/MIXED-RADIX NTT MULTIPLICATION ALGORITHM/ARCHITECTURE CO-DESIGN
+3527
+Algorithm 5: High-radix/Mixed-radix INTTRN with merged post-processing
+Input
+: A vector A of length N, modulus q, the inversion of a 2N-th primitive root of unity ω−1
+2N in Zq, radix R.
+Output : Output vector a.
+1 ω−1
+R ←(ω−1
+2N )2N/R;
+2 s ←⌊log(N)/log(R)⌋;
+3 if s ̸= log(N)/log(R) then
+4
+ˆR ←N/(Rs);
+5
+ω−1
+2M ←ω−1
+2N;
+6
+for b ←0 to Rs −1by R/ ˆR do
+7
+idx ←b · ˆR;
+// unroll from line 8 to 16
+8
+for r1 ←0 to ˆR −1 do
+9
+for r2 ←0 to R
+ˆ
+R −1 do
+10
+Tr1· R
+ˆ
+R +r2 ←Norm_to_D1(Aidx+r1+r2·R);
+11
+T ←The last log ˆR substages of R2INTT(T, R, q, ω−1
+R );
+// Algorithm 2 with line 1 having s from
+log ˆR −1 to 0
+12
+for r1 ←0 to ˆR −1 do
+13
+for r2 ←0 to R
+ˆ
+R −1 do
+14
+Tr1· R
+ˆ
+R +r2 ←D1_to_Norm(Tr1· R
+ˆ
+R +r2);
+15
+Tr1· R
+ˆ
+R +r2 ←Aidx+r1+r2· ˆ
+R · ω−r1·(2·bit-rev(b+r2)+1)
+2M
+16
+Aidx+r1+r2· ˆ
+R ←Tr1· R
+ˆ
+R +r2 mod q
+// ModMul
+17 for s ←⌊log(N)/log(R)⌋−1 to 0 do
+18
+M ←Rs+1;
+19
+ω−1
+2M ←(ω−1
+2N)N/M
+mod q;
+20
+Δidx ←N/Rs+1;
+21
+for b ←0 to Rs −1 do
+22
+for g ←0 to N/Rs+1 −1 do
+23
+idx ←b · N/Rs + g;
+// unroll from line 24 to 29
+24
+for r ←0 to R −1 do
+25
+Tr ←Norm_to_D1(Aidx+Δidx·r);
+26
+T ←R2INTT(T, R, q, ω−1
+R )for r ←0 to R −1 do
+27
+Tr ←D1_to_Norm(Tr);
+28
+Aidx+Δidx·r ←Tr · ω−r·(2·bit-rev(b)+1)
+2M
+mod q
+// ModMul
+29 a ←A;
+subtractions. For the ModMuls, which only involves mod-
+ular multiplications by normal numbers, we use the normal
+representation. This approach optimizes DSP resource us-
+age in FPGAs while maintaining the advantages of D1 for
+modular multiplications by powers of 2.
+IV. REDUCED-COMPLEXITY CONFLICT-FREE
+MEMORY MAPPING
+In an in-place design, R parallel data are read from R banks,
+processed, and then written back to the same addresses. Existing
+designs require R parallel address generators to compute the
+bank indexes, which control the interconnection of the bank ad-
+dresses and the data read/write. By using the method discussed
+in Section II-C, the existing mapping algorithm can be summa-
+rized in Algorithm 6. In previous works, R is small so it is not
+a heavy task to compute R bank indexes in parallel. However,
+for larger R (e.g. R = 16), calculating and keeping R parallel
+bank indexes to select signals across the whole architecture will
+degrade system efﬁciency in terms of resources and frequency.
+Our mapping scheme addresses this issue by using only one
+address generator as well as one select signal.
+The proposed mapping scheme is come up from an obser-
+vation. As shown in Fig. 1(a), data with original addresses are
+partitioned into four banks. The bank indexes are indicated by
+different colors. By a careful check on Fig. 1(a) and 1(d), one
+could observe that the bank indexes in one particular cycle are
+Algorithm 6: Existing memory mapping scheme
+————— AddressGeneration —————
+for j ←0, ...R −1 do
+BankIndexj ←⌈log N
+log R ⌉−1
+i=0
+OrigAddrj[(log R) ·
+(i + 1) : (log R)i] mod R;
+—————-InterconnectBankOut————-
+Op0,1,...R−1 ←data from BankIndex0:R−1;
+—————-InterconnectBankAddr———–
+Addr with BankIndex0:R−1 ←OrigAddr0:R−1[log N −1 : log R];
+—————-InterconnectBankIn—————
+Data with BankIndex0:R−1 ←Op with index 0, 1, ..., R −1;
+correlated. That is, the bank indexes of operands 1, 2 and 3
+can be inferred when the bank index of operand 0 is known. In
+single-radix cases, the data out of the banks can be arranged by
+one-bit circular shifting, resulting in only R possible cases of
+arranging data from banks.
+Fig. 4 depicts the proposed data mapping in a 64-point R4
+design. Data from the four banks are reordered to four circu-
+lar shifting groups, which are from {Bank0, Bank1, Bank2,
+Bank3}, {Bank1, Bank2, Bank3, Bank0}, {Bank2, Bank3,
+Bank0, Bank1} and {Bank3, Bank0, Bank1, Bank2}. The
+output of the multiplexer is 4 parallel data from one group
+of these choices, selected by the calculated bank index of
+the ﬁrst operand. After performing the main calculation, the
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+3528
+IEEE TRANSACTIONS ON COMPUTERS, VOL. 74, NO. 10, OCTOBER 2025
+Fig. 4.
+Conﬂict-free memory mapping for 64-point high-radix R4 NTT/INTT.
+Fig. 5.
+Conﬂict-free memory mapping for 32-point mixed-radix (R4&R2) NTT/INTT. The modiﬁed part compared to Fig. 4 is highlighted in red color. The
+butterﬂies are either fully applied for R4 stages or partially applied for the R2 stage.
+four operands are reordered to the four corresponding re-
+verse groups, which are {Operand0, Operand1, Operand2,
+Operand3}, {Operand3, Operand0, Operand1, Operand2},
+{Operand2, Operand3, Operand0, Operand1} and {Operand1,
+Operand2 Operand3, Operand0}. Selected by the same bank
+index, the output of the multiplexer is then fed into the banks.
+In mixed-radix cases, the data arrangement is a little bit
+different. Fig. 5 shows our data mapping in a 32-point R4&R2
+design. There are totally 3 stages in one 32-point R4&R2
+NTT or INTT. We apply a full R4 butterﬂy for the ﬁrst two
+stages and the ﬁrst substage of the butterﬂy for the last stage
+of NTT. For INTT, the stages are in reverse. It is worth not-
+ing that in the 2*R2 design, like [24], the two R2 butterﬂies
+are parallel and separate so that their {Operand0, Operand1}
+and {Operand2, Operand3} are fed into two R2 butterﬂies re-
+spectively. However, the two R2 in our R4 butterﬂy here for
+the last stage is across to each other, so that the {Operand0,
+Operand2} and {Operand1, Operand3} are fed into two R2
+butterﬂies respectively. In conclusion, the required order for
+the bank indexes of four operands has 4 possible groups again,
+which is {Bank0, Bank2, Bank1, Bank3}, {Bank1, Bank3,
+Bank2, Bank0}, {Bank2, Bank0, Bank3, Bank1} and {Bank3,
+Bank1, Bank0, Bank2}. The corresponding writing orders for
+each one are {Operand0, Operand2, Operand1, Operand3},
+{Operand3, Operand0, Operand2, Operand1}, {Operand1,
+Operand3, Operand0, Operand2} and {Operand2, Operand1,
+Operand3, Operand0}.
+To generalize, a new mapping scheme for single-radix and
+mixed-radix is summarized in Algorithm 7. The bank indexes
+and operand indexes are precomputed. The data, addresses and
+operands are in R possible orders respectively, waiting for the
+Algorithm 7: Proposed memory mapping scheme
+——————– Precomputed ————————
+//
+ˆR = 1 when it is single radix.
+for i ←0, ..., R
+ˆ
+R −1 do
+for j ←0, ..., ˆR −1 do
+for k ←0, ..., R −1 do
+BankIndexesi+j· R
+ˆ
+R ,k ←i· ˆR+j+k mod R;
+for i ←0, ..., R
+ˆ
+R −1 do
+for j ←0, ..., ˆR −1 do
+for k ←0, ..., R −1 do
+OpIndexes(i· ˆ
+R+j+k mod R),k ←i + j · R
+ˆ
+R;
+—————- AddressGeneration ——————
+iSelect ←
+⌈log N
+log R ⌉−1
+
+i=0
+OrigAddr0[(log R) · (i + 1) : (log R)i]
+mod R;
+—————–InterconnectBankOut—————
+Op0:R−1 ←data from BankIndexes0:R−1,iSelect;
+—————–InterconnectBankAddr————–
+Addr0:R−1 ←OrigAddr[log N −1 : log R]
+with OpIndexes0:R−1,iSelect
+——————InterconnectBankIn—————–
+Data0:R−1 ←Op with OpIndexes0:R−1,iSelect;
+selection by the iselect signal which is the bank index of the
+ﬁrst operand calculated by one address generator. Only one
+required group for each interconnection part is selected in each
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+XING et al.: HIGH-RADIX/MIXED-RADIX NTT MULTIPLICATION ALGORITHM/ARCHITECTURE CO-DESIGN
+3529
+Fig. 6.
+An overall polynomial multiplication architecture based on high-radix/mixed-radix in-place NTT over fermat modulus. “−1” denotes the conversion
+from normal representation to D1 representation. “+1” denotes the conversion from D1 representation to normal representation.
+selection. This scheme has lower complexity by minimizing ad-
+dress generators and select signals for interconnection modules
+to one, enhancing resource efﬁciency and frequency in high-
+radix/mixed-radix design.
+V. HIGH-RADIX/MIXED-RADIX NTT
+MULTIPLICATION ARCHITECTURE
+A. The Overall Architecture
+Fig. 6 depicts the overall architecture of the proposed design,
+which is ﬁt for the proposed algorithms. This architecture sup-
+ports complete polynomial multiplication, where the process
+consists of the ﬁrst NTT, the second NTT, one PWM, and one
+INTT, executed sequentially.
+In each cycle, the control module provides the original ad-
+dresses, denoted as OrigAddr. Speciﬁcally, the original ad-
+dresses are R indexes of parallel processing data of the se-
+quence in Algorithm 4 for NTT and Algorithm 5 for INTT.
+For the PWM procedure between two NTTs and one INTT, the
+original addresses are provided by the ﬁrst stage of INTT. The
+OrigAddr0 is fed into address generation to compute the signal
+iselect, which is the key of our reduced-complexity memory
+mapping scheme. The signal iselect is fed into three intercon-
+nection modules to determine the data selection and address
+selection.
+According to the indexes and addresses, R parallel data are
+derived from R banks. In this design, the coefﬁcients of two
+polynomials are aligned one by one and stored in the lower
+halves and upper halves of the same addresses respectively, thus
+the bit-width of each data is twice the size of modulus.
+TABLE II
+DETAILED STATUS FOR WRITING TO/READING FROM BANK
+State
+Signal
+To/From Bank
+Supported Procedure
+11
+All
+Input, PWM
+Write
+01
+Lower Half
+NTT1, PWM, INTT
+10
+Upper Half
+NTT2
+11
+All
+PWM
+Read
+01
+Lower Half
+NTT1, INTT, Output
+10
+Upper Half
+NTT2
+TABLE III
+COMPARISON OF SUPPORTED PARAMETERS AND OPERATIONS IN
+STATE-OF-THE-ART DESIGNS AND OUR PROPOSED DESIGN
+Work
+q
+R
+N
+Supported Op.
+[5]
+Fermat
+2
+256
+(I)NTT/PWM
+[21]
+tunable
+2, 4M
+scalable
+(I)NTT/PWM
+[25]
+tunable
+2
+scalable
+(I)NTT/PWM
+[17]
+tunable
+2, 4
+scalable (R2)
+limited (R4)
+(I)NTT/PWM
+[24]
+ﬁxed
+2
+512,1024
+(I)NTT
+[16]
+tunable
+2, 4
+1024
+(I)NTT
+Ours
+Fermat
+2,4,8,16M
+scalable
+(I)NTT/PWM
+M The design supports the mixed-radix setting.
+When performing PWM, the lower halves and upper halves
+of data would be fed into the ModMul modules. The product
+of them would be written as the lower halves of data into the
+banks. When computing NTT or INTT, the lower halves (for
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+3530
+IEEE TRANSACTIONS ON COMPUTERS, VOL. 74, NO. 10, OCTOBER 2025
+TABLE IV
+IMPLEMENTATION RESULTS OF POLYNOMIAL MULTIPLICATION (2 NTTS, 1 PWM AND 1 INTT) ON FPGA AND COMPARISONS
+Work
+Device
+modulus q
+BFUa
+Radixb
+LUT
+/ATP
+FF
+/ATP
+DSP
+/ATP
+BRAM
+/ATP
+Freq.
+(MHz)
+Cycles
+Time
+(μs)
+N = 256
+[5]c
+Spartan-6
+65537 (17-bit)
+1*R2
+2
+404/5.4
+599/8.0
+0/0.0
+1/13.3
+287
+3824
+13.3
+[21]
+Zynq-7
+3329 (12-bit)
+28*R2,1*R4
+4, 2
+9211/8.6
+9810/9.1
+60/55.7
+1/0.9
+265
+246
+0.9
+[25]d
+Kintex-US+
+12289 (14-bit)
+16*R2
+2
+24186/41.2
+14756/25.1
+48/81.8
+24/40.9
+200
+341
+1.7
+[17]
+Virtex-7
+13-bit
+1*R2
+2
+449/5.3
+271/3.2
+3/35.2
+3/35.2
+286
+3354
+11.7
+1*R4
+4
+1288/4.1
+888/2.8
+12/37.9
+4.5/14.2
+278
+879
+3.2
+8*R2
+2
+6245/10.8
+1864/3.2
+24/41.4
+12/20.7
+256
+442
+1.7
+Ours
+Virtex-7
+65537 (17-bit)
+1*R4
+4
+1690/4.9
+1289/3.7
+4/11.6
+0/0.0
+301
+876
+2.9
+1*R8
+8, 4
+3596/4.6
+2888/3.7
+8/10.3
+0/0.0
+301
+389
+1.3
+1*R16
+16
+8078/5.8
+6184/4.4
+16/11.5
+0/0.0
+274
+197
+0.7
+N = 512
+[21]
+Zynq-7
+12289 (14-bit)
+32*R2,1*R4
+4, 2
+19103/33.2
+13677/23.8
+68/118.3
+1/1.7
+261
+454
+1.7
+[24]e
+Zynq-7
+12289 (14-bit)
+2*R2
+2
+741/12.1
+330/5.4
+2/32.7
+5/81.8
+245
+4010
+16.4
+[17]
+Virtex-7
+14-bit
+1*R2
+2
+489/13.1
+245/6.6
+3/80.4
+3/80.4
+278
+7450
+26.8
+16*R2
+2
+28616/91.1
+4211/13.4
+48.0/152.7
+24/76.4
+154
+490
+3.2
+Ours
+Virtex-7
+65537 (17-bit)
+1*R4
+4, 2
+1955/13.6
+1286/8.9
+4/27.8
+2/13.9
+301
+2092
+6.9
+1*R8
+8
+3559/8.2
+2737/6.3
+8/18.5
+3.5/8.1
+301
+697
+2.3
+1*R16
+16, 2
+8904/13.1
+6321/9.3
+16/23.5
+0/0.0
+274
+402
+1.5
+N = 1024
+[21]
+Zynq-7
+12289 (14-bit)
+36*R2,1*R4
+4, 2
+23261/76.6
+14901/49.1
+76/250.2
+1/3.3
+257
+846
+3.3
+[24]e
+Zynq-7
+12289 (14-bit)
+2*R2
+2
+847/27.6
+375/12.2
+2/65.3
+6/195.8
+244
+7964
+32.6
+[16]e
+Virtex-7
+14-bit
+1*R4
+4
+1196/18.5
+969/15.0
+12/186.0
+3/46.5
+270
+4186
+15.5
+2*R4
+4
+2953/25.2
+1875/16.0
+27/230.9
+5.5/47.0
+250
+2138
+8.6
+1*R2
+2
+475/27.2
+307/17.6
+3/171.7
+1.5/85.9
+278
+15915
+57.2
+8*R2
+2
+6300/56.3
+2124/19.0
+27/241.1
+10/89.3
+227
+2027
+8.9
+[25]d
+Kintex-US+
+12289 (14-bit)
+16*R2
+2
+22648/132.3
+15030/87.8
+48/280.5
+24/140.2
+200
+1169
+5.8
+[17]
+Virtex-7
+14-bit
+1*R4
+4
+1467 / 32.2
+930 / 20.4
+13 / 285.0
+4.5 / 98.6
+189
+4143
+21.9
+4*R4
+4
+8515 / 53.0
+3618 / 22.5
+49 / 305.1
+12 / 74.7
+172
+1071
+6.2
+Ours
+Virtex-7
+65537 (17-bit)
+1*R4
+4
+1395/19.2
+1222/16.8
+4/55.0
+4/55.0
+301
+4140
+13.7
+1*R8
+8, 2
+3463/19.7
+2665/15.1
+8/45.5
+7.5/42.6
+301
+1712
+5.7
+1*R16
+16, 4
+9783/25.6
+6537/17.1
+16/41.8
+0/0.0
+274
+716
+2.6
+a BFU: The style of butterﬂy unit for one NTT. For example, 2*R4 indicates two parallel radix-4 units in the NTT design.
+b If two radix values are listed, this indicates mixed-radix. In our work, mixed-radix is computed by designing butterﬂy unit architecture of higher radix,
+where the lower radix is computed by using part of the same architecture.
+c The design supports only one NTT, one point-wise multiplication and one INTT. One more NTT is added to the cycles and time, assuming the given
+cycles and time from the work is (2 +
+1
+#stages) NTT. The area is assumed to remain the same.
+d The work does not list cycles of this conﬁguration (q and N). The cycles and time here is approximated by PWM cycles in a 16*R2 conﬁguration
+(q = 8380417, N = 256) times the ratio of NTT cycles between the two conﬁgurations.
+e The design supports only one NTT/INTT. The cycles and time here is approximated by that of (3 +
+1
+#stages) NTT, while the area is assumed to
+remain the same.
+the ﬁrst NTT and the INTT) or the upper halves (for the second
+NTT) are reordered by the interconnection module. For NTT,
+the data are routed to the ModMul modules, followed by the R-
+point R2NTT module for further processing. For INTT, the data
+are ﬁrst sent to the R-point R2INTT module, and then to the
+ModMul modules for computation. The outputs pass through
+another interconnection module before being written back to
+the memory banks. The signal isthe ˆRstage indicates whether
+the special ˆR stage is active, determining if the R2NTT and
+R2INTT modules should be fully applied or used partially in
+their speciﬁc substages.
+Table II summarizes operations and support procedures for
+different write states and read states.
+VI. IMPLEMENTATION RESULTS AND COMPARISONS
+The
+proposed
+architecture
+is
+designed
+using
+Verilog
+HDL and implemented on the 28nm Xilinx Virtex-7 FPGA
+(xc7vx690tffg1761-3). Vivado 2022.2 is used for synthesis
+and implementation. Nine different settings are implemented,
+with N = 256, 512, 1024 and R = 4, 8, 16. For cases where N
+is not a power of R, the related mixed-radix design is applied.
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+XING et al.: HIGH-RADIX/MIXED-RADIX NTT MULTIPLICATION ALGORITHM/ARCHITECTURE CO-DESIGN
+3531
+Table III provides a general analysis, while Table IV presents
+the detailed implementation results of our proposed polynomial
+multiplication design compared to state-of-the-art designs. We
+assume that a complete polynomial multiplication consists of 2
+NTTs, 1 PWM and 1 INTT. However, some of the compared
+designs, such as [5], [16], [24], do not support a complete poly-
+nomial multiplication. For these designs, we assume that the
+INTT requires the same number of cycles as the NTT, and that
+the PWM requires the same number of cycles as a single stage of
+the NTT. We do not consider additional resource consumption
+or potential frequency degradation, which are very likely to
+occur due to increased data storage requirements and more
+complex routing. We believe that this assumption is generous
+and lenient for designs that do not fully support polynomial
+multiplication.
+Firstly we compare our work with [5], which uses the same
+Fermat modulus q = 65537. Ma et al. [5] propose an R2-NTT
+polynomial multiplication design with one R2 butterﬂy for a
+ﬁxed degree N = 256. Our R4/R8/R16 designs consume only
+22.9%/10.2%/5.2% cycles of their work, primarily due to the
+beneﬁts of higher radix. Since Ma et al. [5] employ a modular
+multiplier designed with shifting and accumulation using D1
+representation, their design does not use DSPs but relies on a
+relatively large number of LUTs and FFs. Our work achieves
+around 50% better area-time product (ATP) in terms of FFs. Ad-
+ditionally, by employing LUT-based memory instead of BRAM
+in cases where a large R and a small N lead to very small stor-
+age requirements per bank, our R8/R16 designs ﬁnally achieve
+a slightly better ATP in terms of LUTs while eliminating all
+BRAM usage.
+Then we compare our work with [21] which features a mixed-
+radix design. Duong-Ngoc and Lee [21] implement a fully
+pipelined design without reordering buffers. Their NTT archi-
+tecture consists of 4 sequences of R2 butterﬂy units in the initial
+stages, followed by a R4 butterﬂy unit at the end, resulting
+in a mixed-radix architecture combining R2 and R4 for each
+degree. For the most similar conﬁgurations in N = 512, the
+proposed mixed-radix R4&R2 design uses 2.6× cycles more
+than [21]. This difference is primarily due to two factors: their
+design includes two NTTs in parallel, and they use a large
+quantity of butterﬂy units to construct a pipeline across stages.
+Additionally, they use only one BRAM because no temporary
+storage is required. However, these advantages come at the
+cost of signiﬁcantly higher LUT, FF, and DSP usage. In con-
+trast, our work efﬁciently reuses butterﬂy units, resulting in
+59.0%/62.6%/76.5% less ATP in terms of LUT/FF/DSP. For
+additional conﬁgurations, such as those with a higher radix like
+R16, our design can achieve faster performance while using
+fewer resources in every category compared to [21], demon-
+strating even greater efﬁciency gain, despite their modulus bit-
+width being 3–5 bits smaller than ours.
+Lastly we compare representative results from [16], [17],
+[24], [25], which propose architectures with various numbers of
+R2 or R4 butterﬂy units. Generally, as observed in [16] and [17],
+R4 is more efﬁcient than R2 for a single butterﬂy unit, but efﬁ-
+ciency decreases with the number of butterﬂy units. Although
+all the selected results in [16], [17], [24], [25] are on modulus
+with smaller bit-width, our work generally outperforms them in
+ATPs of DSP/BRAM while remaining similarly competitive in
+those of LUT/FF.
+Zhang et al. [24] propose a 2*R2 NTT design on a 14-
+bit modulus 12289. For N = 512, our R8 design achieves
+43.4%/90.1% less ATP in terms of DSP/BRAM. For N =
+1024, our R8&R2 design achieves 30.3%/78.2% less ATP in
+terms of DSP/BRAM. Chen et al. [16] propose NTT design with
+various numbers of parallel R2 or R4 butterﬂies on a tunable
+14-bit modulus and N = 1024. Compared with their best con-
+ﬁguration, i.e., 1*R4, our R8&R2 design achieves 75.6%/8.4%
+less ATP in terms of DSP/BRAM but similar ATP in terms
+of LUT/FF. Li et al. [25] propose an NTT-based polynomial
+multiplication design with different numbers of parallel R2
+butterﬂies on tunable modulus and scalable degree. The but-
+terﬂy unit performs NTT, PWM, and INTT according to the
+control signal. Their design with the best performance uses
+16*R2 units. Due to their large numbers of parallel processing
+elements, our 1*R16 design achieves more than 80% less ATP
+across all categories for both N = 256 and 1024. Mu et al.
+[17] propose a scalable NTT-based polynomial multiplication
+design with different numbers of parallel R2 or R4 butterﬂies
+on tunable modulus and scalable degree. As 512 is not a power
+of 4, Mu et al. [17] do not support R4 in N = 512. Comparing
+with their best results, our work achieves 70%-85% less ATP
+in terms of DSP and over 90% less ATP in terms of BRAM for
+N = 256/512/1024. The above analysis demonstrates the great
+potential of the Fermat modulus combined with our proposed
+improvement methods.
+VII. CONCLUSION AND FUTURE WORKS
+In summary, a highly efﬁcient polynomial multiplication
+architecture based on high-radix and mixed-radix NTT over
+Fermat modulus is proposed. The detailed derivation process for
+high-radix and mixed-radix NTT with merged pre-processing
+and INTT with merged post-processing is provided. To facilitate
+PWM calculations and to leverage the complexity advantages of
+both normal and D1 representations, the NTT/INTT processes
+have been modularized into ModMuls and R2NTT/R2INTT
+modules. To maintain efﬁciency across a broader range of
+conﬁgurations, R2NTT/R2INTT is reused in the ﬁnal stage of
+mixed-radix cases. Additionally, the complexity of the memory
+mapping scheme is reduced to improve frequency in high-radix
+cases. In most conﬁgurations, our design reduces DSP ATP
+by approximately 30%–85% and BRAM ATP by 70%–100%,
+while remaining competitive in LUT and FF ATP. While a few
+designs may show advantages in speciﬁc aspects, our approach
+consistently demonstrates strong overall efﬁciency.
+Looking ahead, our design can serve as a building block for
+constructing efﬁcient implementations within existing schemes
+such as Hawk. The efﬁciency of FNT-based polynomial mul-
+tiplication on alternative platforms—such as GPU or ASIC—
+remains an area for further investigation. Additionally, ex-
+ploring more FHE or PQC schemes that can support Fermat
+moduli presents a challenging yet promising research oppor-
+tunity. Moreover, the design and optimization of polynomial
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+3532
+IEEE TRANSACTIONS ON COMPUTERS, VOL. 74, NO. 10, OCTOBER 2025
+multiplication over a broader class of moduli—such as
+Mersenne, pseudo-Mersenne/Fermat and even undiscovered
+forms with more favorable arithmetic properties—remain open
+research directions. It is anticipated that the strategic selection
+and use of such moduli will lead to more elegant and compu-
+tationally efﬁcient cryptographic constructions.
+REFERENCES
+[1] Q. D. Truong, P. Duong-Ngoc, and H. Lee, “Hybrid number theoretic
+transform architecture for homomorphic encryption,” IEEE Trans. Very
+Large Scale Integr. (VLSI) Syst., vol. 33, no. 7, pp. 2039–2043, Jul. 2025.
+[2] Z. Ye et al., “PQNTRU: Acceleration of NTRU-based schemes via
+customized post-quantum processor,” IEEE Trans. Comput., vol. 74,
+no. 5, pp. 1649–1662, May 2025.
+[3] Z. Ye, R. Song, H. Zhang, D. Chen, R. C. Cheung, and K. Huang, “A
+highly-efﬁcient lattice-based post-quantum cryptography processor for
+IoT applications,” IACR Trans. Cryptogr. Hardware Embedded Syst.,
+vol. 2024, no. 2, pp. 130–153, 2024.
+[4] A. Kim et al., “Exploring the advantages and challenges of Fermat
+NTT in FHE acceleration,” in Proc. Annu. Int. Cryptol. Conf., Cham,
+Switzerland: Springer, 2024, pp. 76–106.
+[5] L. Ma, X. Wu, and G. Bai, “A low cost high performance polynomial
+multiplier design for FPGA implementation,” in Proc. IEEE 3rd Int.
+Conf. Electron. Technol. (ICET), Piscataway, NJ, USA: IEEE Press,
+2020, pp. 83–86.
+[6] A. Abdulrahman, V. Hwang, M. J. Kannwischer, and A. Sprenkels,
+“Faster kyber and dilithium on the cortex-m4,” in Proc. Int. Conf. Appl.
+Cryptogr. Netw. Secur., Cham, Switzerland: Springer, 2022, pp. 853–
+871.
+[7] L. Leibowitz, “A simpliﬁed binary arithmetic for the Fermat number
+transform,” IEEE Trans. Acoust., Speech, Signal Process., vol. 24, no. 5,
+pp. 356–359, Oct. 1976.
+[8] L. Ducas, E. W. Postlethwaite, and W. van Woerden, “HAWK: Module
+LIP makes lattice signatures fast, compact and simple,” in Proc. 28th
+Int. Conf. Theory Appl. Cryptol. Inf. Secur. Adv. Cryptol. (ASIACRYPT),
+Taipei, Taiwan, vol. 13794, Cham, Switzerland: Springer Nature, 2023,
+p. 65.
+[9] Y. Xing et al., “Low-complexity chromatic dispersion compensation
+using high-radix Fermat number transform,” J. Lightw. Technol., vol.
+42, no. 15, pp. 5190–5203, 2024.
+[10] Z. Liu, S. Chen, J. Chen, Y. Li, and M. Tang, “Low complexity
+equalization in coherent optical communication based on Fermat number
+transform,” Opt. Lett., vol. 49, no. 14, pp. 3910–3913, 2024.
+[11] S. Chen et al., “Fermat number transform based chromatic dis-
+persion compensation and adaptive equalization algorithm,” 2024,
+arXiv:2405.04253.
+[12] A. Daher, E. H. Baghious, N. El Khouja, E. Radoi, and G. Burel,
+“Fast algorithm for optimal design of Fermat number transform based
+block digital ﬁlters,” Digit. Signal Process., vol. 113, Jun. 2021, Art.
+no. 103029.
+[13] W. Xu, Z. Zhang, X. You, and C. Zhang, “Reconﬁgurable and low-
+complexity accelerator for convolutional and generative networks over
+ﬁnite ﬁelds,” IEEE Trans. Comput.-Aided Des. Integr. Circuits Syst.,
+vol. 39, no. 12, pp. 4894–4907, Dec. 2020.
+[14] Z. Baozhou, N. Ahmed, J. Peltenburg, K. Bertels, and Z. Al-Ars,
+“Diminished-1 fermat number transform for integer convolutional neural
+networks,” in Proc. IEEE 4th Int. Conf. Big Data Analytics (ICBDA),
+Piscataway, NJ, USA: IEEE Press, 2019, pp. 47–52.
+[15] T. Toivonen and J. Heikkila, “Video ﬁltering with Fermat number
+theoretic transforms using residue number system,” IEEE Trans. Circuits
+Syst. Video Technol., vol. 16, no. 1, pp. 92–101, Jan. 2006.
+[16] X. Chen, B. Yang, S. Yin, S. Wei, and L. Liu, “CFNTT: Scalable
+radix-2/4 NTT multiplication architecture with an efﬁcient conﬂict-free
+memory mapping scheme,” IACR Trans. Cryptogr. Hardware Embedded
+Syst., vol. 2022, no. 1, pp. 94–126, Nov. 2021.
+[17] J. Mu et al., “Scalable and conﬂict-free NTT hardware accelerator de-
+sign: Methodology, proof, and implementation,” IEEE Trans. Comput.-
+Aided Design Integr. Circuits Syst., vol. 42, no. 5, pp. 1504–1517, May
+2023.
+[18] Y. Zhang et al., “Ultra high-speed polynomial multiplications for
+lattice-based cryptography on FPGAs,” IEEE Trans. Emerg. Topics
+Comput. Intell., vol. 10, no. 4, pp. 1993–2005, Oct.–Dec. 2022.
+[19] Z. Cheng, B. Zhang, and M. Pedram, “A high-performance, conﬂict-
+free memory-access architecture for modular polynomial multiplication,”
+IEEE Trans. Comput.-Aided Design Integr. Circuits Syst., vol. 43, no. 2,
+pp. 492–505, Feb. 2024.
+[20] Y. Zhao, X. Liu, Y. Hu, and H. Xiao, “Design of an efﬁcient
+NTT/INTT architecture with low-complex memory mapping scheme,”
+IEEE Trans. Circuits Syst., II, Exp. Briefs, vol. 71, no. 1, pp. 400–404,
+Jan. 2024.
+[21] P. Duong-Ngoc and H. Lee, “Conﬁgurable mixed-radix number theoretic
+transform architecture for lattice-based cryptography,” IEEE Access,
+vol. 10, pp. 12732–12741, 2022.
+[22] G. Li, D. Chen, G. Mao, W. Dai, A. I. Sanka, and R. C. Cheung,
+“Algorithm-hardware co-design of split-radix discrete Galois transfor-
+mation for KyberKEM,” IEEE Trans. Emerg. Topics Comput., vol. 11,
+no. 4, pp. 824–838, Oct.–Dec. 2023.
+[23] W. Guo and S. Li, “Split-radix based compact hardware architecture
+for crystals-kyber,” IEEE Trans. Comput., vol. 73, no. 1, pp. 97–108,
+Jan. 2024.
+[24] N. Zhang, B. Yang, C. Chen, S. Yin, S. Wei, and L. Liu, “Highly
+efﬁcient architecture of NewHope-NIST on FPGA using low-complexity
+NTT/INTT,” IACR Trans. Cryptographic Hardware Embedded Syst., vol.
+2020, no. 2, pp. 49–72, Mar. 2020.
+[25] B. Li, Y. Yan, Y. Wei, and H. Han, “Scalable and parallel optimization
+of the number theoretic transform based on FPGA,” IEEE Trans.
+Very Large Scale Integr. (VLSI) Syst., vol. 32, no. 2, pp. 291–304,
+Feb. 2024.
+[26] A. C. Mert, E. Karabulut, E. Öztürk, E. Sava¸s, and A. Aysu, “An
+extensive study of ﬂexible design methods for the number theoretic
+transform,” IEEE Trans. Comput., vol. 71, no. 11, pp. 2829–2843,
+Nov. 2022.
+[27] S. S. Roy, F. Vercauteren, N. Mentens, D. D. Chen, and I. Verbauwhede,
+“Compact ring-lwe cryptoprocessor,” in Proc. Int. Workshop Cryptogr.
+Hardware Embedded Syst., Berlin, Germany: Springer, 2014, pp. 371–
+391.
+[28] T. Pöppelmann, T. Oder, and T. Güneysu, “High-performance ideal
+lattice-based cryptography on 8-bit atxmega microcontrollers,” in Proc.
+Int. Conf. Cryptol. Inf. Secur. Latin Amer., Cham, Switzerland: Springer,
+2015, pp. 346–365.
+[29] R. Agarwal and C. Burrus, “Fast convolution using Fermat number
+transforms with applications to digital ﬁltering,” IEEE Trans. Acoust.,
+Speech, Signal Process., vol. 22, no. 2, pp. 87–97, Apr. 1974.
+[30] H.-F. Lo, M.-D. Shieh, and C.-M. Wu, “Design of an efﬁcient FFT
+processor for DAB system,” in Proc. IEEE Int. Symp. Circuits Syst.
+(ISCAS) (Cat. No. 01CH37196), vol. 4, Piscataway, NJ, USA: IEEE
+Press, 2001, pp. 654–657.
+[31] D. D. Chen et al., “High-speed polynomial multiplication architecture
+for ring-LWE and SHE cryptosystems,” IEEE Trans. Circuits Syst. I,
+Reg. Papers, vol. 62, no. 1, pp. 157–166, Jan. 2015.
+[32] U. Banerjee, T. S. Ukyab, and A. P. Chandrakasan, “Sapphire: A
+conﬁgurable crypto-processor for post-quantum lattice-based protocols,”
+2019, arXiv:1910.07557.
+[33] L. Johnson, “Conﬂict free memory addressing for dedicated FFT hard-
+ware,” IEEE Trans. Circuits Syst. II, Analog Digit. Signal Process.,
+vol. 39, no. 5, pp. 312–316, May 1992.
+[34] X. Chen, B. Yang, Y. Lu, S. Yin, S. Wei, and L. Liu, “Efﬁcient access
+scheme for multi-bank based NTT architecture through conﬂict graph,”
+in Proc. 59th ACM/IEEE Des. Automat. Conf., 2022, pp. 91–96.
+Yile Xing (Student Member, IEEE) received the
+B.Eng. degree from the School of Electronics and
+Communication Engineering, Sun Yat-sen Univer-
+sity, China, in 2021. She is currently working
+toward the Ph.D. degree with the Department of
+Electrical Engineering, City University of Hong
+Kong. Her research interests include digital sig-
+nal processing algorithm design and reconﬁgurable
+computing with FPGA.
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 
+XING et al.: HIGH-RADIX/MIXED-RADIX NTT MULTIPLICATION ALGORITHM/ARCHITECTURE CO-DESIGN
+3533
+Guangyan Li received the B.Eng. degree from the
+Department of Electrical Engineering, City Univer-
+sity of Hong Kong, in 2020. He is currently working
+toward the Ph.D. degree with the Department of
+Electrical Engineering, City University of Hong
+Kong. His research interests include reconﬁgurable
+computing with FPGA, and postquantum cryptog-
+raphy algorithm design.
+Zewen Ye (Student Member, IEEE) received the
+bachelor’s degree in microelectronics science and
+engineering from Zhejiang University, in 2020. He
+is currently working toward the joint Ph.D. degree
+with Zhejiang University and the City University of
+Hong Kong, advised by Prof. Kejie Huang and Prof.
+Ray C. C. Cheung. His research interests include
+postquantum cryptography, hardware design, and
+RISC-V.
+Ryan W. L. Luk (Member, IEEE) received the
+B.Eng. degree in electronic engineering from The
+Hong Kong University of Science and Technology,
+in 2021. Since 2022, he has been working toward
+the M.Sc. degree in electrical engineering with the
+City University of Hong Kong. Currently, he is a
+Research Assistant supervised by Dr. Ray C. C.
+Cheung with the Department of Electrical Engineer-
+ing, City University of Hong Kong. His research
+interests include computer arithmetic and modulo-
+multiplier design.
+Donglong Chen (Member, IEEE) received the
+Ph.D. degree from the Department of Electronic En-
+gineering, City University of Hong Kong, in 2015.
+He was a Visiting Research Scholar of COSIC,
+KU Leuven, Belgium, in 2013. After completing
+his Ph.D. degree study, he spent four years with
+the industry including Huawei Technology Com-
+pany Ltd., and Tencent Technology Company Ltd.
+Currently, he is an Associate Professor with the Fac-
+ulty of Science and Technology, Beijing Normal-
+Hong Kong Baptist University Zhuhai, China. His
+research interests include cryptographic engineering, software/hardware co-
+design for AI algorithms, and privacy computing.
+Hong Yan (Life Fellow, IEEE) received the Ph.D.
+degree from Yale University. He was a Professor
+of imaging science with the University of Sydney,
+and currently a Wong Chun Hong Professor of
+data engineering and a Chair Professor of computer
+engineering with the City University of Hong Kong.
+His research interests include image processing and
+computer vision, machine learning, and compu-
+tational biology and medicine. He has over 600
+journal and conference publications in these areas.
+He received the 2016 Norbert Wiener Award from
+the IEEE SMC Society for contributions to image and biomolecular pattern
+recognition techniques. He is an IAPR Fellow, a Foreign Member of the
+European Academy of Sciences and Arts, and a fellow of the US National
+Academy of Inventors.
+Ray C. C. Cheung (Senior Member, IEEE) re-
+ceived the B.Eng.(Hons.) and M.Phil. degrees in
+computer engineering and computer science & en-
+gineering from The Chinese University of Hong
+Kong (CUHK), in 1999 and 2001, respectively,
+and the DIC and Ph.D. degrees in computing from
+Imperial College London (IC), in 2007. Currently,
+he is the Associate Provost (Digital Learning) with
+the CityUHK, a Professor with the Department of
+Electrical Engineering and Department of Computer
+Science at CityUHK, and the CityUHK-EE Xilinx
+Lab. He is the current Section Chairman of IEEE HK Section, the Former
+Chairman of the IEEE Hong Kong Section CAS/COM Chapter, and an
+Executive Committee Member of the IEEE Hong Kong Section Computer
+Chapter. His research interests include cryptographic hardware designs and
+design exploration of system-on-chip (SoC) designs, AIoT designs, and
+embedded system designs.
+Authorized licensed use limited to: International Institute of Information Technology Bangalore. Downloaded on January 18,2026 at 16:03:35 UTC from IEEE Xplore.  Restrictions apply. 

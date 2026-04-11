@@ -1,0 +1,22 @@
+# Simulation artifacts
+*.vcd
+*.out
+*.vvp
+ntt_sim
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS metadata
+Thumbs.db
+.DS_Store
+
+# Hardware build artifacts (if any)
+*.log
+*.jou
+*.pb
+*.html
+*.xml
+*.dir/
