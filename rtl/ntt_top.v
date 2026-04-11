@@ -78,7 +78,8 @@ module ntt_top #(
     localparam integer STAGES        = LOGN/LOGR;
     localparam integer R_POW_STAGES  = R ** STAGES;
     localparam integer RHAT          = (R_POW_STAGES != 0) ? (N / R_POW_STAGES) : 1;
-    localparam integer SUPPORTS_RHAT = (R == 4) && (RHAT == 2);
+    localparam integer R_OVER_RHAT   = (RHAT != 0) ? (R / RHAT) : 1;
+    localparam integer SUPPORTS_RHAT = (RHAT > 1) && (R_OVER_RHAT == 2);
     localparam [WWIDTH-1:0] TW_ONE   = {{(WWIDTH-1){1'b0}}, 1'b1};
 
     function [LOGN-1:0] bit_reverse;
@@ -119,49 +120,48 @@ module ntt_top #(
         .tw_out  (tw_factors_inv)
     );
 
-    // Mixed-radix special-stage twiddles for R4&R2 case:
-    // k=[0,1,2,3] uses factors [1,1,w(step0),w(step1)].
+    // Mixed-radix special-stage twiddles for the R_OVER_RHAT=2 case.
+    // Lane k has r1=floor(k/2), r2=k%2 and uses omega^{r1*(2*bitrev(b+r2)+1)}.
     wire [LOGN-1:0] rhat_b = SUPPORTS_RHAT ? (orig_addrs[LOGN-1:0] / RHAT) : {LOGN{1'b0}};
     wire [TW_BITS-1:0] rhat_step0 = SUPPORTS_RHAT ?
         (((2 * bit_reverse(rhat_b, STAGES * LOGR)) + 1) % (2 * N)) : {TW_BITS{1'b0}};
     wire [TW_BITS-1:0] rhat_step1 = SUPPORTS_RHAT ?
         (((2 * bit_reverse(rhat_b + 1'b1, STAGES * LOGR)) + 1) % (2 * N)) : {TW_BITS{1'b0}};
 
-    wire [TW_BITS-1:0] rhat_step0_inv = ((2 * N) - rhat_step0) % (2 * N);
-    wire [TW_BITS-1:0] rhat_step1_inv = ((2 * N) - rhat_step1) % (2 * N);
+    reg [R*TW_BITS-1:0] rhat_tw_idx_ntt;
+    reg [R*TW_BITS-1:0] rhat_tw_idx_intt;
+    integer tl;
+    integer tr1;
+    reg [TW_BITS-1:0] tbase;
+    always @(*) begin
+        for (tl = 0; tl < R; tl = tl + 1) begin
+            tr1 = (R_OVER_RHAT != 0) ? (tl / R_OVER_RHAT) : 0;
+            tbase = ((tl % R_OVER_RHAT) == 0) ? rhat_step0 : rhat_step1;
+            rhat_tw_idx_ntt[tl*TW_BITS +: TW_BITS]  = (tr1 * tbase) % (2 * N);
+            rhat_tw_idx_intt[tl*TW_BITS +: TW_BITS] = ((2 * N) - ((tr1 * tbase) % (2 * N))) % (2 * N);
+        end
+    end
 
-    wire [WWIDTH-1:0] tw_rhat2, tw_rhat3, tw_rhat2_inv, tw_rhat3_inv;
-    twiddle_lookup #(.B(B), .N(N)) u_tw_lookup_2 (
-        .tw_idx (rhat_step0),
-        .tw_val (tw_rhat2)
-    );
-    twiddle_lookup #(.B(B), .N(N)) u_tw_lookup_3 (
-        .tw_idx (rhat_step1),
-        .tw_val (tw_rhat3)
-    );
-    twiddle_lookup #(.B(B), .N(N)) u_tw_lookup_2_inv (
-        .tw_idx (rhat_step0_inv),
-        .tw_val (tw_rhat2_inv)
-    );
-    twiddle_lookup #(.B(B), .N(N)) u_tw_lookup_3_inv (
-        .tw_idx (rhat_step1_inv),
-        .tw_val (tw_rhat3_inv)
-    );
+    wire [R*WWIDTH-1:0] tw_rhat_pack;
+    wire [R*WWIDTH-1:0] tw_rhat_pack_inv;
+    genvar tg;
+    generate
+        for (tg = 0; tg < R; tg = tg + 1) begin : gen_tw_lookup_rhat
+            twiddle_lookup #(.B(B), .N(N)) u_tw_lookup_ntt (
+                .tw_idx (rhat_tw_idx_ntt[tg*TW_BITS +: TW_BITS]),
+                .tw_val (tw_rhat_pack[tg*WWIDTH +: WWIDTH])
+            );
+            twiddle_lookup #(.B(B), .N(N)) u_tw_lookup_intt (
+                .tw_idx (rhat_tw_idx_intt[tg*TW_BITS +: TW_BITS]),
+                .tw_val (tw_rhat_pack_inv[tg*WWIDTH +: WWIDTH])
+            );
+        end
+    endgenerate
 
     wire [R*WWIDTH-1:0] tw_factors_ntt_sel;
     wire [R*WWIDTH-1:0] tw_factors_intt_sel;
-    generate
-        if (R == 4) begin : gen_tw_select_r4
-            wire [R*WWIDTH-1:0] tw_rhat_pack     = {tw_rhat3,     tw_rhat2,     TW_ONE, TW_ONE};
-            wire [R*WWIDTH-1:0] tw_rhat_pack_inv = {tw_rhat3_inv, tw_rhat2_inv, TW_ONE, TW_ONE};
-
-            assign tw_factors_ntt_sel = (is_Rhat_stage && SUPPORTS_RHAT) ? tw_rhat_pack     : tw_factors;
-            assign tw_factors_intt_sel = (is_Rhat_stage && SUPPORTS_RHAT) ? tw_rhat_pack_inv : tw_factors_inv;
-        end else begin : gen_tw_select_generic
-            assign tw_factors_ntt_sel = tw_factors;
-            assign tw_factors_intt_sel = tw_factors_inv;
-        end
-    endgenerate
+    assign tw_factors_ntt_sel  = (is_Rhat_stage && SUPPORTS_RHAT) ? tw_rhat_pack     : tw_factors;
+    assign tw_factors_intt_sel = (is_Rhat_stage && SUPPORTS_RHAT) ? tw_rhat_pack_inv : tw_factors_inv;
 
     // =========================================================================
     // ADDRESS GENERATOR  (used during NTT / INTT / PWM)
@@ -227,7 +227,7 @@ module ntt_top #(
     // INTERCONNECT: BankOut → Operands  (NTT/INTT/PWM)
     // =========================================================================
     wire [R*DWIDTH-1:0]  operands_out;
-    interconnect_bank_out #(.DWIDTH(DWIDTH), .R(R)) u_icon_out (
+    interconnect_bank_out #(.DWIDTH(DWIDTH), .R(R), .RHAT(RHAT)) u_icon_out (
         .bank_data_out (bank_dout),
         .iselect       (iselect),
         .is_Rhat_stage (is_Rhat_stage),
@@ -275,20 +275,30 @@ module ntt_top #(
         end
     endgenerate
 
-    wire [WWIDTH-1:0] r2ntt_out0, r2ntt_out1, r2ntt_out2, r2ntt_out3;
-    r2ntt_r4 #(.B(B), .KSHIFT(8), .KNEG(1)) u_r2ntt (
-        .a0 (ntt_d1_in[0*WWIDTH +: WWIDTH]),
-        .a1 (ntt_d1_in[1*WWIDTH +: WWIDTH]),
-        .a2 (ntt_d1_in[2*WWIDTH +: WWIDTH]),
-        .a3 (ntt_d1_in[3*WWIDTH +: WWIDTH]),
-        .is_Rhat_stage (is_Rhat_stage),
-        .A0 (r2ntt_out0), .A1(r2ntt_out1), .A2(r2ntt_out2), .A3(r2ntt_out3)
-    );
-
-    // Convert NTT outputs back to normal representation before write-back.
     wire [R*WWIDTH-1:0] ntt_result_d1;
     wire [R*WWIDTH-1:0] ntt_result;
-    assign ntt_result_d1 = {r2ntt_out3, r2ntt_out2, r2ntt_out1, r2ntt_out0};
+    generate
+        if (R == 4) begin : gen_r2ntt_r4
+            wire [WWIDTH-1:0] r2ntt_out0, r2ntt_out1, r2ntt_out2, r2ntt_out3;
+            r2ntt_r4 #(.B(B), .KSHIFT(8), .KNEG(1)) u_r2ntt (
+                .a0 (ntt_d1_in[0*WWIDTH +: WWIDTH]),
+                .a1 (ntt_d1_in[1*WWIDTH +: WWIDTH]),
+                .a2 (ntt_d1_in[2*WWIDTH +: WWIDTH]),
+                .a3 (ntt_d1_in[3*WWIDTH +: WWIDTH]),
+                .is_Rhat_stage (is_Rhat_stage),
+                .A0 (r2ntt_out0), .A1(r2ntt_out1), .A2(r2ntt_out2), .A3(r2ntt_out3)
+            );
+            assign ntt_result_d1 = {r2ntt_out3, r2ntt_out2, r2ntt_out1, r2ntt_out0};
+        end else begin : gen_r2ntt_generic
+            r2ntt_generic #(.B(B), .N(N), .R(R)) u_r2ntt_g (
+                .in_d1        (ntt_d1_in),
+                .is_Rhat_stage(is_Rhat_stage),
+                .out_d1       (ntt_result_d1)
+            );
+        end
+    endgenerate
+
+    // Convert NTT outputs back to normal representation before write-back.
     generate
         for (gi = 0; gi < R; gi = gi + 1) begin : gen_ntt_d1n
             d1_to_norm #(B) u_ntt_d1n (
@@ -311,18 +321,27 @@ module ntt_top #(
         end
     endgenerate
 
-    wire [WWIDTH-1:0] r2intt_out0, r2intt_out1, r2intt_out2, r2intt_out3;
-    r2intt_r4 #(.B(B), .KSHIFT(8), .KSHIFT_INV(8)) u_r2intt (
-        .A0 (intt_d1_in[0*WWIDTH +: WWIDTH]),
-        .A1 (intt_d1_in[1*WWIDTH +: WWIDTH]),
-        .A2 (intt_d1_in[2*WWIDTH +: WWIDTH]),
-        .A3 (intt_d1_in[3*WWIDTH +: WWIDTH]),
-        .is_Rhat_stage (is_Rhat_stage),
-        .a0 (r2intt_out0), .a1(r2intt_out1), .a2(r2intt_out2), .a3(r2intt_out3)
-    );
-
     wire [R*WWIDTH-1:0] intt_d1_out;
-    assign intt_d1_out = {r2intt_out3, r2intt_out2, r2intt_out1, r2intt_out0};
+    generate
+        if (R == 4) begin : gen_r2intt_r4
+            wire [WWIDTH-1:0] r2intt_out0, r2intt_out1, r2intt_out2, r2intt_out3;
+            r2intt_r4 #(.B(B), .KSHIFT(8), .KSHIFT_INV(8)) u_r2intt (
+                .A0 (intt_d1_in[0*WWIDTH +: WWIDTH]),
+                .A1 (intt_d1_in[1*WWIDTH +: WWIDTH]),
+                .A2 (intt_d1_in[2*WWIDTH +: WWIDTH]),
+                .A3 (intt_d1_in[3*WWIDTH +: WWIDTH]),
+                .is_Rhat_stage (is_Rhat_stage),
+                .a0 (r2intt_out0), .a1(r2intt_out1), .a2(r2intt_out2), .a3(r2intt_out3)
+            );
+            assign intt_d1_out = {r2intt_out3, r2intt_out2, r2intt_out1, r2intt_out0};
+        end else begin : gen_r2intt_generic
+            r2intt_generic #(.B(B), .N(N), .R(R)) u_r2intt_g (
+                .in_d1        (intt_d1_in),
+                .is_Rhat_stage(is_Rhat_stage),
+                .out_d1       (intt_d1_out)
+            );
+        end
+    endgenerate
 
     wire [R*WWIDTH-1:0] intt_norm;
     generate
@@ -406,7 +425,7 @@ module ntt_top #(
     wire [R*DWIDTH-1:0]  bfly_data_routed;
 
     // With combinational ModMul, iselect is valid for the same cycle's results.
-    interconnect_bank_in #(.DWIDTH(DWIDTH), .R(R)) u_icon_in (
+    interconnect_bank_in #(.DWIDTH(DWIDTH), .R(R), .RHAT(RHAT)) u_icon_in (
         .operands_in  (bfly_data_pre),
         .iselect      (iselect),
         .is_Rhat_stage(is_Rhat_stage),
@@ -429,7 +448,7 @@ module ntt_top #(
     // BANK WRITE ADDRESS  (combinational path: no pipeline delay)
     // =========================================================================
     wire [R*AWIDTH-1:0]  ntt_waddr;
-    interconnect_bank_addr #(.AWIDTH(AWIDTH), .R(R)) u_icon_addr (
+    interconnect_bank_addr #(.AWIDTH(AWIDTH), .R(R), .RHAT(RHAT)) u_icon_addr (
         .raw_addrs      (bank_addrs_raw),
         .iselect        (iselect),
         .is_Rhat_stage  (is_Rhat_stage),
