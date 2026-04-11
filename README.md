@@ -13,7 +13,7 @@ This repository contains:
 - The implementation is currently configured for R = 4.
 
 ## Repository layout
-
+```
 .
 |-- docs/
 |   |-- High-Radix_Mixed-Radix_NTT_Multiplication_Algorithm_Architecture_Co-Design_Over_Fermat_Modulus.pdf
@@ -47,7 +47,7 @@ This repository contains:
 |       `-- tb_twiddle_rom_test.v
 |-- .gitignore
 `-- README.md
-
+```
 ## Prerequisites
 
 - Python 3.10+
