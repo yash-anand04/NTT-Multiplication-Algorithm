@@ -169,7 +169,7 @@ module ctrl_unit #(
                 // ----------------------------------------------------------
                 NTT2: begin
                     bank_we <= {R{1'b1}};
-                    is_Rhat_stage <= (stage_cnt == 0) ? 1'b1 : 1'b0;  // Mixed-radix first stage
+                    is_Rhat_stage <= 1'b0;  // NTT2 is NOT mixed-radix (always full 4-point)
                     if (g_cnt < delta_idx - 1) begin
                         g_cnt <= g_cnt + 1;
                     end else begin
