@@ -4,8 +4,8 @@
 // Tests full polynomial multiplication c = a * b mod (x^256 + 1) mod 65537
 //
 // Usage:
-//   1. python golden_model.py   (generates hex files in rtl/ directory)
-//   2. Run simulation: xvlog/xelab/xsim or iverilog/vvp
+//   1. python golden_model.py   (generates hex files in sim/ directory)
+//   2. Run simulation: iverilog/vvp
 //
 // Checks output against expected_out.hex
 // =============================================================================
@@ -55,7 +55,7 @@ module tb_ntt_top;
         $readmemh("expected_out.hex", expected);
 
         // Dump waveform
-        $dumpfile("tb_ntt_top.vcd");
+        $dumpfile("bin/tb_ntt_top.vcd");
         $dumpvars(0, tb_ntt_top);
 
         // Reset
@@ -90,18 +90,40 @@ module tb_ntt_top;
             end
         end
 
-        // Collect output: N cycles
-        @(posedge done);
-        for (i = 0; i < N; i = i + 1) begin
-            @(posedge clk);
-            got_out[i] = data_out;
-        end
+        // done is now high after OUTPUT phase completes. The seq_cnt is frozen at its last value
+        // to keep the final data stable. The mem_banks have 1-cycle registered read latency.
+        // During the OUTPUT state (before done), seq_cnt increments 0..N-1, presenting addresses.
+        // The first data appears one cycle after address presentation.
+        // We must READ DURING OUTPUT PHASE while seq_cnt is incrementing, not after.
+        
+        // Strategy: Monitor OUTPUT state and capture data while it's active
+        errors = 0;
+        fork
+            begin
+                wait(done);
+                #10000 $finish;  // Prevent timeout hang
+            end
+            begin
+                integer read_idx = 0;
+                while (read_idx < N) begin
+                    @(posedge clk);
+                    if (dut.u_ctrl.fsm_state == 3'd6) begin  // OUTPUT state = 6
+                        got_out[read_idx] = data_out;
+                        if (read_idx < 10 || read_idx == 255)
+                            $display("DEBUG: Read coeff[%0d] = %0h (expected %0h) from data_out", read_idx, data_out, expected[read_idx]);
+                        read_idx = read_idx + 1;
+                    end
+                end
+            end
+        join_any
+
 
         // Compare with expected
         errors = 0;
         for (i = 0; i < N; i = i + 1) begin
             if (got_out[i] !== expected[i]) begin
-                $display("MISMATCH at coeff[%0d]: got=%0h expected=%0h", i, got_out[i], expected[i]);
+                if (i < 10 || i == 255)
+                    $display("MISMATCH at coeff[%0d]: got=%0h expected=%0h", i, got_out[i], expected[i]);
                 errors = errors + 1;
             end
         end
@@ -115,9 +137,14 @@ module tb_ntt_top;
         $finish;
     end
 
-    // ---- Monitor -------------------------------------------------------------
+    // ---- Monitor after OUTPUT completes -----------------------------------------
     initial begin
-        $monitor("[%0t] state=? done=%b data_out=%0h", $time, done, data_out);
+        @(negedge done);
+        repeat(10) @(posedge clk);
+        $display("Monitoring after done signal...");
+        // Wait for next done
+        wait(!done);
     end
+
 
 endmodule

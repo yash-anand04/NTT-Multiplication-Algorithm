@@ -10,46 +10,33 @@
 //   result = p_low - p_high  (mod 2^B + 1)
 //   If result < 0, add 2^B + 1
 //
-// For pipelined usage, a 2-stage pipeline is used (multiply, then reduce).
+// COMBINATIONAL implementation (no pipeline registers) for functional
+// correctness in the single-butterfly, in-place NTT design.
+// The ctrl_unit issues one butterfly group per cycle and results must be
+// available in the same cycle for write-back.
 // =============================================================================
 
 module mod_mul_fermat #(
     parameter B = 16   // Fermat number Fn = 2^B + 1, q has B+1 bits
 )(
-    input  wire           clk,
-    input  wire           rst,
-    input  wire [B:0]     a,          // normal rep, range [0, 2^B]  (B+1 bits)
-    input  wire [B:0]     b,          // normal rep, range [0, 2^B]  (B+1 bits)
-    output reg  [B:0]     result      // normal rep, range [0, 2^B]
+    input  wire           clk,    // kept for interface compatibility
+    input  wire           rst,    // kept for interface compatibility
+    input  wire [B:0]     a,      // normal rep, range [0, 2^B]  (B+1 bits)
+    input  wire [B:0]     b,      // normal rep, range [0, 2^B]  (B+1 bits)
+    output wire [B:0]     result  // normal rep, range [0, 2^B]
 );
-    // Stage 1: multiply
-    reg [2*B-1:0] product_r;
-    always @(posedge clk or posedge rst) begin
-        if (rst)
-            product_r <= 0;
-        else
-            product_r <= a * b;
-    end
+    // Combinational multiply (need 2*(B+1) bits to hold full product of (B+1)*(B+1))
+    wire [2*B+1:0] product = a * b;
 
-    // Stage 2: Fermat reduction
-    // p_low - p_high may be negative, so use signed-extended subtraction
-    wire [B:0] p_low  = product_r[B-1:0];         // lower B bits
-    wire [B:0] p_high = product_r[2*B-1:B];       // upper B bits (B bits wide)
-    wire [B+1:0] diff  = {1'b0, p_low} - {1'b0, p_high};  // (B+2) bits, signed check via MSB
+    // Fermat reduction: result = p_low - p_high mod (2^B+1)
+    wire [B:0] p_low  = product[B-1:0];          // lower B bits (zero-extended)
+    wire [B:0] p_high = product[2*B-1:B];         // upper B bits
 
-    always @(posedge clk or posedge rst) begin
-        if (rst)
-            result <= 0;
-        else begin
-            if (diff[B+1]) begin
-                // diff is negative, add Fn = 2^B + 1
-                result <= diff[B:0] + (1'b1 << B) + 1'b1;
-            end else if (diff[B:0] == (1'b1 << B) + 1) begin
-                // diff == 2^B+1 = Fn, reduce to 0
-                result <= 0;
-            end else begin
-                result <= diff[B:0];
-            end
-        end
-    end
+    wire [B+1:0] diff = {1'b0, p_low} - {1'b0, p_high};
+
+    wire [B:0] diff_corrected = diff[B+1] ? (diff[B:0] + (1'b1 << B) + 1'b1) :
+                                (diff[B:0] == ((1'b1 << B) + 1)) ? {(B+1){1'b0}} :
+                                diff[B:0];
+
+    assign result = diff_corrected;
 endmodule

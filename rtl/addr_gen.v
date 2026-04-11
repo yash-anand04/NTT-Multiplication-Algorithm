@@ -41,9 +41,9 @@ module addr_gen #(
         end
     endgenerate
 
-    // XOR all groups together
+    // XOR all LOGR-bit groups together (group-wise, not flat bit reduction)
     wire [LOGR-1:0] isel_wire;
-    assign isel_wire = ^{xor_groups[0], xor_groups[1], xor_groups[2], xor_groups[3]};
+    assign isel_wire = xor_groups[0] ^ xor_groups[1] ^ xor_groups[2] ^ xor_groups[3];
     assign iselect = isel_wire;
 
     // --- Bank addresses: upper AWIDTH bits of each OrigAddr -------------------

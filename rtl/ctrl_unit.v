@@ -33,16 +33,18 @@ module ctrl_unit #(
     input  wire                  start,
 
     // Outputs to data path
-    output reg  [R*LOGN-1:0]     orig_addrs,      // R original addresses
-    output reg  [$clog2(N)-1:0]  tw_addr,          // Twiddle ROM address
-    output reg                   is_Rhat_stage,    // Mixed-radix special stage flag
+    output reg  [R*$clog2(N)-1:0]    orig_addrs,      // R original addresses (R x LOGN bits)
+    output reg  [$clog2(2*N)-1:0]    tw_step,          // Twiddle step = (2*bitrev(b)+1)*delta for ROM
+    output reg                        is_Rhat_stage,    // Mixed-radix special stage flag
     output reg  [1:0]            rd_sel,           // Read select (which half of banks)
     output reg  [1:0]            wr_sel,           // Write select
     output reg                   ntt_mode,         // 1=NTT butterfly, 0=INTT butterfly
     output reg                   pwm_en,           // PWM enable
     output reg  [R-1:0]         bank_we,           // Write enable per bank
-    output reg                   done
+    output reg                   done,
+    output wire [2:0]            fsm_state          // Expose FSM state to top
 );
+    assign fsm_state = state;
     // ---- State machine encoding -----------------------------------------------
     localparam IDLE   = 3'd0,
                LOAD   = 3'd1,
@@ -54,53 +56,61 @@ module ctrl_unit #(
                DONE   = 3'd7;
 
     reg [2:0]           state;
-    reg [2:0]           stage_cnt;    // Current stage (0 to STAGES)
-    reg [AWIDTH-1:0]    g_cnt;        // Loop counter g (over N/R^{s+1} iterations)
-    reg [LOGN-1:0]      b_cnt;        // Loop counter b (over R^s iterations)
+    reg [2:0]           stage_cnt;    // Current stage (0 to STAGES-1)
+    reg [LOGN-1:0]      g_cnt;        // Loop counter g (0 .. delta_idx-1)
+    reg [LOGN-1:0]      b_cnt;        // Loop counter b (0 .. R^s - 1)
     reg [LOGN-1:0]      load_cnt;     // Load/output counter
-    reg [LOGN-1:0]      delta_idx;    // N / R^{s+1}
-    reg [PIPE_LATENCY-1:0] pipe_valid; // Pipeline valid shift register
+    reg [LOGN-1:0]      delta_idx;    // N / R^{s+1}  (= stride between butterfly groups)
+    reg [LOGN-1:0]      b_limit;      // R^s - 1  (max value of b_cnt for current stage)
 
-    // ---- Helper: compute R original addresses for current (b, g, stage) ------
-    integer r_idx;
+    // ---- Helper: compute R original addresses and twiddle step ---------------
+    // tw_step = (2*bitrev(b_cnt)+1) * delta_idx   (used to address the 2N-entry ROM)
+    integer r_idx, bit_idx;
+    reg [LOGN-1:0] b_rev;   // bit-reversed b_cnt truncated to stage_cnt bits
     always @(*) begin
-        // idx = b * (N / R^s) + g
-        // OrigAddr[r] = idx + delta_idx * r
+        // Bit-reverse b_cnt over (stage_cnt) bits
+        b_rev = 0;
+        for (bit_idx = 0; bit_idx < LOGN; bit_idx = bit_idx + 1) begin
+            if (bit_idx < stage_cnt)
+                b_rev[stage_cnt - 1 - bit_idx] = b_cnt[bit_idx];
+        end
+        // OrigAddr[r] = b*(delta_idx*R) + g + delta_idx*r
         for (r_idx = 0; r_idx < R; r_idx = r_idx + 1) begin
             orig_addrs[r_idx*LOGN +: LOGN] =
-                b_cnt * (delta_idx * R) + g_cnt + delta_idx * r_idx;
+                b_cnt * (delta_idx << LOGR) + g_cnt + (delta_idx * r_idx);
         end
-        tw_addr = b_cnt;  // simplified; full twiddle indexing done externally
+        // tw_step for twiddle ROM: (2*bitrev(b)+1) * delta_idx, mod 2N
+        tw_step = ((2 * b_rev + 1) * delta_idx) % (2 * N);
     end
 
     // ---- Main FSM ------------------------------------------------------------
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            state        <= IDLE;
-            stage_cnt    <= 0;
-            g_cnt        <= 0;
-            b_cnt        <= 0;
-            load_cnt     <= 0;
-            delta_idx    <= N/R;
+            state         <= IDLE;
+            stage_cnt     <= 0;
+            g_cnt         <= 0;
+            b_cnt         <= 0;
+            b_limit       <= 0;          // R^0 - 1 = 0
+            load_cnt      <= 0;
+            delta_idx     <= N/R;
             is_Rhat_stage <= 0;
-            rd_sel       <= 2'b00;
-            wr_sel       <= 2'b00;
-            ntt_mode     <= 1;
-            pwm_en       <= 0;
-            bank_we      <= 0;
-            done         <= 0;
-            pipe_valid   <= 0;
+            rd_sel        <= 2'b00;
+            wr_sel        <= 2'b00;
+            ntt_mode      <= 1;
+            pwm_en        <= 0;
+            bank_we       <= 0;
+            done          <= 0;
         end else begin
             case (state)
                 // ----------------------------------------------------------
                 IDLE: begin
                     done <= 0;
                     if (start) begin
-                        state     <= LOAD;
-                        load_cnt  <= 0;
-                        rd_sel    <= 2'b11;  // write all (input)
-                        wr_sel    <= 2'b11;
-                        bank_we   <= {R{1'b1}};
+                        state    <= LOAD;
+                        load_cnt <= 0;
+                        rd_sel   <= 2'b11;
+                        wr_sel   <= 2'b11;
+                        bank_we  <= {R{1'b1}};
                     end
                 end
 
@@ -127,26 +137,28 @@ module ctrl_unit #(
                 // ----------------------------------------------------------
                 NTT1: begin
                     bank_we <= {R{1'b1}};
-                    // Advance inner loops
+                    is_Rhat_stage <= (stage_cnt == 0) ? 1'b1 : 1'b0;  // Mixed-radix first stage
                     if (g_cnt < delta_idx - 1) begin
                         g_cnt <= g_cnt + 1;
                     end else begin
                         g_cnt <= 0;
-                        if (b_cnt < (1 << (stage_cnt*LOGR)) - 1) begin
+                        if (b_cnt < b_limit) begin
                             b_cnt <= b_cnt + 1;
                         end else begin
                             b_cnt <= 0;
                             if (stage_cnt < STAGES - 1) begin
                                 stage_cnt <= stage_cnt + 1;
                                 delta_idx <= delta_idx >> LOGR;
+                                b_limit   <= (b_limit << LOGR) | {LOGR{1'b1}}; // R^{s+1}-1
                             end else begin
-                                // NTT1 done → start NTT2
+                                // NTT1 done → NTT2
                                 state     <= NTT2;
                                 stage_cnt <= 0;
                                 g_cnt     <= 0;
                                 b_cnt     <= 0;
+                                b_limit   <= 0;        // R^0-1 = 0
                                 delta_idx <= N / R;
-                                rd_sel    <= 2'b10;   // upper half = poly b
+                                rd_sel    <= 2'b10;
                                 wr_sel    <= 2'b10;
                                 ntt_mode  <= 1;
                             end
@@ -157,25 +169,30 @@ module ctrl_unit #(
                 // ----------------------------------------------------------
                 NTT2: begin
                     bank_we <= {R{1'b1}};
+                    is_Rhat_stage <= (stage_cnt == 0) ? 1'b1 : 1'b0;  // Mixed-radix first stage
                     if (g_cnt < delta_idx - 1) begin
                         g_cnt <= g_cnt + 1;
                     end else begin
                         g_cnt <= 0;
-                        if (b_cnt < (1 << (stage_cnt*LOGR)) - 1) begin
+                        if (b_cnt < b_limit) begin
                             b_cnt <= b_cnt + 1;
                         end else begin
                             b_cnt <= 0;
                             if (stage_cnt < STAGES - 1) begin
                                 stage_cnt <= stage_cnt + 1;
                                 delta_idx <= delta_idx >> LOGR;
+                                b_limit   <= (b_limit << LOGR) | {LOGR{1'b1}};
                             end else begin
+                                // NTT2 done → PWM
                                 state     <= PWM;
                                 stage_cnt <= 0;
                                 g_cnt     <= 0;
                                 b_cnt     <= 0;
+                                b_limit   <= 0;        // only b=0 during PWM
+                                delta_idx <= N / R;    // g runs 0..N/R-1
                                 load_cnt  <= 0;
-                                delta_idx <= 1;
-                                rd_sel    <= 2'b11;   // both halves for PWM
+                                // PWM: N/R groups of R elements
+                                rd_sel    <= 2'b11;
                                 wr_sel    <= 2'b01;
                                 pwm_en    <= 1;
                                 ntt_mode  <= 0;
@@ -185,19 +202,24 @@ module ctrl_unit #(
                 end
 
                 // ----------------------------------------------------------
+                // PWM: iterate through all N/R groups of R elements.
+                // orig_addrs is driven by g_cnt/b_cnt so we must advance them.
+                // With delta_idx=N/R and b_limit=0 (only b=0), g runs 0..N/R-1.
                 PWM: begin
                     bank_we <= {R{1'b1}};
-                    // PWM processes N/R points per cycle, R at a time
-                    if (load_cnt < N/R - 1) begin
-                        load_cnt <= load_cnt + 1;
+                    // delta_idx=N/R, b_limit=0 → only b=0, g runs 0..N/R-1
+                    if (g_cnt < delta_idx - 1) begin
+                        g_cnt <= g_cnt + 1;
                     end else begin
+                        // All N/R groups done → go to INTT
                         state     <= INTT;
-                        load_cnt  <= 0;
-                        stage_cnt <= 0;
                         g_cnt     <= 0;
                         b_cnt     <= 0;
-                        delta_idx <= 1;
-                        rd_sel    <= 2'b01;   // lower half = result
+                        load_cnt  <= 0;
+                        stage_cnt <= 0;
+                        b_limit   <= 0;        // R^0-1 = 0 at first INTT stage
+                        delta_idx <= N / R;    // DIF INTT: first stage stride = N/R
+                        rd_sel    <= 2'b01;
                         wr_sel    <= 2'b01;
                         pwm_en    <= 0;
                         ntt_mode  <= 0;
@@ -205,23 +227,28 @@ module ctrl_unit #(
                 end
 
                 // ----------------------------------------------------------
+                // INTT: DIF — stage 0 has delta_idx=N/R, stage STAGES-1 has delta_idx=1
+                // Start at stage 0: delta_idx large, b_limit=0 (b only takes value 0)
+                // Each next stage: delta_idx >>= LOGR, b_limit = (b*R+R-1)
                 INTT: begin
                     bank_we <= {R{1'b1}};
+                    is_Rhat_stage <= (stage_cnt == 0) ? 1'b1 : 1'b0;  // Mixed-radix first stage
                     if (g_cnt < delta_idx - 1) begin
                         g_cnt <= g_cnt + 1;
                     end else begin
                         g_cnt <= 0;
-                        if (b_cnt < (1 << (stage_cnt*LOGR)) - 1) begin
+                        if (b_cnt < b_limit) begin
                             b_cnt <= b_cnt + 1;
                         end else begin
                             b_cnt <= 0;
-                            // INTT goes from STAGES-1 down to 0
                             if (stage_cnt < STAGES - 1) begin
                                 stage_cnt <= stage_cnt + 1;
-                                delta_idx <= delta_idx << LOGR;
+                                delta_idx <= delta_idx >> LOGR;   // stride gets smaller each stage
+                                b_limit   <= (b_limit << LOGR) | {LOGR{1'b1}};
                             end else begin
+                                // NTT3 done → go to OUTPUT
                                 state    <= OUTPUT;
-                                load_cnt <= 0;
+                                load_cnt <= 0;  // use load_cnt to count outputs, not g_cnt
                                 bank_we  <= 0;
                                 rd_sel   <= 2'b01;
                                 wr_sel   <= 2'b00;
@@ -233,6 +260,8 @@ module ctrl_unit #(
                 // ----------------------------------------------------------
                 OUTPUT: begin
                     bank_we <= 0;
+                    // Spend N cycles sequentially reading all output coefficients
+                    // use load_cnt to count 0..N-1, then transition to DONE
                     if (load_cnt < N - 1) begin
                         load_cnt <= load_cnt + 1;
                     end else begin

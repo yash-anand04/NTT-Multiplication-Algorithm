@@ -1,4 +1,5 @@
 # Simulation artifacts
+sim/bin/*
 *.vcd
 *.out
 *.vvp
@@ -20,3 +21,6 @@ Thumbs.db
 *.html
 *.xml
 *.dir/
+
+# Virtual environment
+venv/

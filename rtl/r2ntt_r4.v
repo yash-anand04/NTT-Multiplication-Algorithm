@@ -40,7 +40,7 @@ module r2ntt_r4 #(
 
     // Output mux: when is_Rhat_stage, only substage 0 is used (R^hat=2 case)
     assign A0 = is_Rhat_stage ? t0 : A0_full;
-    assign A1 = is_Rhat_stage ? t2 : A1_full;
-    assign A2 = is_Rhat_stage ? t1 : A2_full;
+    assign A1 = is_Rhat_stage ? t1 : A1_full;
+    assign A2 = is_Rhat_stage ? t2 : A2_full;
     assign A3 = is_Rhat_stage ? t3 : A3_full;
 endmodule

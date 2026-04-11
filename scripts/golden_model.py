@@ -13,6 +13,7 @@ Generates:
 
 import random
 import sys
+import os
 
 # ---- Parameters -------------------------------------------------------
 q = 65537        # F4 = 2^16 + 1
@@ -97,7 +98,9 @@ def d1_mul_2k(k, x, B=16):
     bits = x & ((1 << B) - 1)
     # invert circular left shift by k on B bits
     shifted = ((bits << k) | (bits >> (B - k))) & ((1 << B) - 1)
-    return shifted
+    # D1 correction: D1(a*2^k) = shifted(D1(a)) + (2^k - 1)
+    adjusted = (shifted + ((1 << k) - 1)) & ((1 << (B+1)) - 1)
+    return adjusted
 
 def d1_add(a, b, B=16):
     if a == (1 << B):
@@ -202,6 +205,15 @@ def generate_twiddle_rom(q=65537, N=256):
 if __name__ == "__main__":
     random.seed(42)
 
+    # Get the directory where golden_model.py is located
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    # Target directory is one level up and then into 'sim'
+    sim_dir = os.path.join(base_dir, "..", "sim")
+
+    # Ensure the sim directory exists
+    if not os.path.exists(sim_dir):
+        os.makedirs(sim_dir)
+
     # Generate random polynomials with coefficients in [0, q-1]
     a_coeffs = [random.randint(0, q - 1) for _ in range(N)]
     b_coeffs = [random.randint(0, q - 1) for _ in range(N)]
@@ -213,25 +225,25 @@ if __name__ == "__main__":
     c_coeffs = poly_mul_ntt(a_coeffs, b_coeffs)
 
     # Write stimulus and expected output
-    with open("../sim/input_a.hex", "w") as f:
+    with open(os.path.join(sim_dir, "input_a.hex"), "w") as f:
         for c in a_coeffs:
             f.write(f"{c:05x}\n")
 
-    with open("../sim/input_b.hex", "w") as f:
+    with open(os.path.join(sim_dir, "input_b.hex"), "w") as f:
         for c in b_coeffs:
             f.write(f"{c:05x}\n")
 
-    with open("../sim/expected_out.hex", "w") as f:
+    with open(os.path.join(sim_dir, "expected_out.hex"), "w") as f:
         for c in c_coeffs:
             f.write(f"{c:05x}\n")
 
     # Write twiddle factor ROM
     tw = generate_twiddle_rom(q, N)
-    with open("../sim/twiddle_factors.hex", "w") as f:
+    with open(os.path.join(sim_dir, "twiddle_factors.hex"), "w") as f:
         for t in tw:
             f.write(f"{t:05x}\n")
 
-    print("Generated: input_a.hex, input_b.hex, expected_out.hex, twiddle_factors.hex")
+    print(f"Generated hex files in: {os.path.abspath(sim_dir)}")
     print(f"a[0:4] = {a_coeffs[:4]}")
     print(f"b[0:4] = {b_coeffs[:4]}")
     print(f"c[0:4] = {c_coeffs[:4]}")

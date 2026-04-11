@@ -29,8 +29,8 @@ endmodule
 // If in == 2^B (i.e. D1 zero), output stays 2^B.
 // Left shift by k positions (mod B): out[B-1:0] = {in[B-1-k:0], in[B-1:B-k]}
 // Right shift by k positions (mod B): circular right shift
-// NOTE: k must be in [-(B-1), B-1]; caller is responsible.
-//
+// CORRECTION: After circular shift, must add (2^K - 1) for D1 encoding (D1(x*2^k) = shifted(D1(x)) + 2^k - 1)
+// NOTE: k must be in [-(B-1), B-1]; caller is responsible.  
 // For synthesizable constant-shift use: instantiate with a fixed K parameter.
 module d1_mul_by_2k #(
     parameter B  = 16,   // bit width of Fermat number
@@ -42,7 +42,10 @@ module d1_mul_by_2k #(
 );
     wire d1_zero = (in == (1'b1 << B));
     wire [B-1:0] shifted = {in[B-1-K:0], in[B-1:B-K]};  // invert circular left shift
-    assign out = d1_zero ? in : {1'b0, shifted};
+    // D1 correction: after shift, add 2^K - 1 to get proper D1-encoded result
+    localparam [B:0] D1_ADJUST = (1'b1 << K) - 1'b1;
+    wire [B:0] adjusted = {1'b0, shifted} + D1_ADJUST;
+    assign out = d1_zero ? in : adjusted;
 endmodule
 
 // ---- d1_add -----------------------------------------------------------------
@@ -62,9 +65,9 @@ module d1_add #(parameter B = 16) (
 
     // Raw sum (B+2 bits to catch overflow)
     wire [B+1:0] raw_sum = {1'b0, in1} + {1'b0, in2};
-    // Fermat reduction: t[B-1:0] + ~t[B] (add 1 if no overflow, subtract 1 if overflow)
+    // Fermat reduction: t[B-1:0] + (1 - t[B]) (add 1 if no overflow, subtract 1 if overflow)
     // In D1 sum = (a-1)+(b-1) = a+b-2, so result is (a+b-1)-1 = (a*b)-1 in normal, correct in D1
-    wire [B:0] reduced = raw_sum[B-1:0] + (~raw_sum[B]);
+    wire [B:0] reduced = raw_sum[B-1:0] + (1 - raw_sum[B]);
 
     assign out = in1_zero ? in2 :
                  in2_zero ? in1 :
