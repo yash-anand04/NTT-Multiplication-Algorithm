@@ -1,20 +1,23 @@
-# Simulation artifacts
-sim/bin/*
-*.vcd
-*.out
-*.vvp
-ntt_sim
-
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 
-# OS metadata
-Thumbs.db
-.DS_Store
+# Virtual environments
+venv/
+.venv/
 
-# Hardware build artifacts (if any)
+# Simulation and waveform artifacts
+*.vcd
+*.vvp
+*.out
+a.out
+ntt_sim
+sim/a.out
+sim/bin/
+sim/outputs*.txt
+
+# General logs and reports
 *.log
 *.jou
 *.pb
@@ -22,6 +25,6 @@ Thumbs.db
 *.xml
 *.dir/
 
-# Virtual environment
-venv/
-BUG_FIXES_APPLIED.md
+# OS metadata
+Thumbs.db
+.DS_Store
