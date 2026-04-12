@@ -31,24 +31,33 @@ module addr_gen #(
     output wire [LOGR-1:0]       iselect,      // Bank index select signal (one-hot bit)
     output wire [R*AWIDTH-1:0]   bank_addrs    // Bank addresses for all R banks
 );
-    // --- Compute iSelect: XOR of log-R-bit groups of orig_addr0 ---------------
-    // For LOGR=2, R=4: iSelect = orig_addr0[1:0] XOR orig_addr0[3:2] XOR orig_addr0[5:4] XOR ...
+    localparam integer FULL_GROUPS = LOGN / LOGR;
+    localparam integer REM_BITS    = LOGN - (FULL_GROUPS * LOGR);
+
+    // --- Compute iSelect: sum of base-R address groups modulo R ----------------
+    // For mixed-radix (e.g., R=8, N=256), include the top partial group as well.
     genvar k;
-    wire [LOGR-1:0] xor_groups [0:(LOGN/LOGR)-1];
+    wire [LOGR-1:0] addr_groups [0:FULL_GROUPS-1];
     generate
-        for (k = 0; k < LOGN/LOGR; k = k + 1) begin : gen_xor
-            assign xor_groups[k] = orig_addr0[k*LOGR +: LOGR];
+        for (k = 0; k < FULL_GROUPS; k = k + 1) begin : gen_grp
+            assign addr_groups[k] = orig_addr0[k*LOGR +: LOGR];
         end
     endgenerate
 
     // Sum all LOGR-bit groups modulo R.
     integer sg;
+    reg [LOGR-1:0] rem_group;
     reg [LOGR+3:0] isel_acc;
     reg [LOGR-1:0] isel_wire;
     always @(*) begin
+        rem_group = {LOGR{1'b0}};
         isel_acc = {LOGR+4{1'b0}};
-        for (sg = 0; sg < LOGN/LOGR; sg = sg + 1)
-            isel_acc = isel_acc + xor_groups[sg];
+        for (sg = 0; sg < FULL_GROUPS; sg = sg + 1)
+            isel_acc = isel_acc + addr_groups[sg];
+        if (REM_BITS > 0) begin
+            rem_group[REM_BITS-1:0] = orig_addr0[FULL_GROUPS*LOGR +: REM_BITS];
+            isel_acc = isel_acc + rem_group;
+        end
         isel_wire = isel_acc[LOGR-1:0];
     end
     assign iselect = isel_wire;

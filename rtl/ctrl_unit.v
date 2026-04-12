@@ -26,7 +26,7 @@ module ctrl_unit #(
     parameter STAGES  = LOGN/LOGR,     // 4  (for R=4, N=256)
     parameter DEPTH   = N/R,           // 64 entries per bank
     parameter AWIDTH  = LOGN-LOGR,     // 6
-    parameter PIPE_LATENCY = 3         // ModMul pipeline depth (1 addr + 2 mul stages)
+    parameter PIPE_LATENCY = 1         // Combinational ModMul path uses single-cycle issue
 )(
     input  wire                  clk,
     input  wire                  rst,
@@ -40,7 +40,7 @@ module ctrl_unit #(
     output reg  [1:0]            wr_sel,           // Write select
     output reg                   ntt_mode,         // 1=NTT butterfly, 0=INTT butterfly
     output reg                   pwm_en,           // PWM enable
-    output reg  [R-1:0]         bank_we,           // Write enable per bank
+    output wire [R-1:0]         bank_we,           // Write enable per bank
     output reg                   done,
     output wire [2:0]            fsm_state          // Expose FSM state to top
 );
@@ -58,6 +58,7 @@ module ctrl_unit #(
     localparam integer HAS_RHAT_STAGE = (N != R_POW_STAGES);
     localparam integer RHAT          = (R_POW_STAGES != 0) ? (N / R_POW_STAGES) : 1;
     localparam integer R_OVER_RHAT   = (RHAT != 0) ? (R / RHAT) : 1;
+    localparam integer INTT_B_INIT   = (N / (R * RHAT)) - 1;
 
     assign fsm_state = state;
 
@@ -69,6 +70,9 @@ module ctrl_unit #(
     reg [LOGN-1:0]      delta_idx;    // N / R^{s+1}  (= stride between butterfly groups)
     reg [LOGN-1:0]      b_limit;      // R^s - 1  (max value of b_cnt for current stage)
     reg [$clog2(PIPE_LATENCY+1)-1:0] stall_cnt;
+
+    wire compute_state = (state == NTT1) || (state == NTT2) || (state == PWM) || (state == INTT);
+    assign bank_we = (compute_state && (stall_cnt == 0)) ? {R{1'b1}} : {R{1'b0}};
 
     // ---- Helper: compute R original addresses and twiddle step ---------------
     // tw_step = (2*bitrev(b_cnt)+1) * delta_idx for normal stages.
@@ -128,7 +132,6 @@ module ctrl_unit #(
             wr_sel        <= 2'b00;
             ntt_mode      <= 1;
             pwm_en        <= 0;
-            bank_we       <= 0;
             done          <= 0;
             is_Rhat_stage <= 0;
         end else begin
@@ -143,7 +146,6 @@ module ctrl_unit #(
                         load_cnt <= 0;
                         rd_sel   <= 2'b11;
                         wr_sel   <= 2'b11;
-                        bank_we  <= {R{1'b1}};
                     end
                 end
 
@@ -165,7 +167,6 @@ module ctrl_unit #(
                         wr_sel    <= 2'b01;
                         ntt_mode  <= 1;
                         pwm_en    <= 0;
-                        bank_we   <= {R{1'b1}};
                     end
                 end
 
@@ -173,9 +174,7 @@ module ctrl_unit #(
                 NTT1: begin
                     if (stall_cnt != 0) begin
                         stall_cnt <= stall_cnt - 1'b1;
-                        bank_we   <= 0;
                     end else begin
-                        bank_we   <= {R{1'b1}};
                         stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
 
                         if (is_Rhat_stage) begin
@@ -240,9 +239,7 @@ module ctrl_unit #(
                 NTT2: begin
                     if (stall_cnt != 0) begin
                         stall_cnt <= stall_cnt - 1'b1;
-                        bank_we   <= 0;
                     end else begin
-                        bank_we   <= {R{1'b1}};
                         stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
 
                         if (is_Rhat_stage) begin
@@ -313,9 +310,7 @@ module ctrl_unit #(
                 PWM: begin
                     if (stall_cnt != 0) begin
                         stall_cnt <= stall_cnt - 1'b1;
-                        bank_we   <= 0;
                     end else begin
-                        bank_we   <= {R{1'b1}};
                         stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
 
                         if (g_cnt < delta_idx - 1) begin
@@ -341,8 +336,8 @@ module ctrl_unit #(
                                 is_Rhat_stage <= 0;
                                 // Algorithm 5 high-radix stages: s from STAGES-1 down to 0.
                                 stage_cnt <= STAGES - 1;
-                                b_limit   <= (N / R) - 1;
-                                delta_idx <= 1;
+                                b_limit   <= INTT_B_INIT;
+                                delta_idx <= RHAT;
                             end
                         end
                     end
@@ -355,9 +350,7 @@ module ctrl_unit #(
                 INTT: begin
                     if (stall_cnt != 0) begin
                         stall_cnt <= stall_cnt - 1'b1;
-                        bank_we   <= 0;
                     end else begin
-                        bank_we   <= {R{1'b1}};
                         stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
 
                         if (is_Rhat_stage) begin
@@ -369,8 +362,8 @@ module ctrl_unit #(
                                 stage_cnt <= STAGES - 1;
                                 g_cnt <= 0;
                                 b_cnt <= 0;
-                                b_limit <= (N / R) - 1;
-                                delta_idx <= 1;
+                                b_limit <= INTT_B_INIT;
+                                delta_idx <= RHAT;
                                 stall_cnt <= 0;
                             end
                         end else begin
@@ -390,7 +383,6 @@ module ctrl_unit #(
                                         // INTT done → go to OUTPUT
                                         state    <= OUTPUT;
                                         load_cnt <= 0;
-                                        bank_we  <= 0;
                                         rd_sel   <= 2'b01;
                                         wr_sel   <= 2'b00;
                                         stall_cnt <= 0;
@@ -403,7 +395,6 @@ module ctrl_unit #(
 
                 // ----------------------------------------------------------
                 OUTPUT: begin
-                    bank_we <= 0;
                     is_Rhat_stage <= 0;
                     stall_cnt <= 0;
                     // Spend N cycles sequentially reading all output coefficients
@@ -419,7 +410,6 @@ module ctrl_unit #(
                 // ----------------------------------------------------------
                 DONE: begin
                     done  <= 1;
-                    bank_we <= 0;
                     is_Rhat_stage <= 0;
                     stall_cnt <= 0;
                     if (!start)

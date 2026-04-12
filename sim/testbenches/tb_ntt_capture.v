@@ -1,9 +1,13 @@
 `timescale 1ns/1ps
 
+`ifndef R_VAL
+`define R_VAL 4
+`endif
+
 module tb_ntt_capture;
     localparam B      = 16;
     localparam N      = 256;
-    localparam R      = 4;
+    localparam R      = `R_VAL;
     localparam WWIDTH = B + 1;
 
     reg clk, rst, start;
@@ -33,6 +37,8 @@ module tb_ntt_capture;
     initial begin
         $readmemh("input_a.hex", input_a);
         $readmemh("input_b.hex", input_b);
+
+        $display("TB_CONFIG N=%0d R=%0d", N, R);
 
         $display("INPUT_HEAD a=%05h %05h %05h %05h", input_a[0], input_a[1], input_a[2], input_a[3]);
         $display("INPUT_HEAD b=%05h %05h %05h %05h", input_b[0], input_b[1], input_b[2], input_b[3]);

@@ -26,6 +26,7 @@ module interconnect_bank_out #(
     output wire [R*DWIDTH-1:0]  operands_out     // R operands in correct order
 );
     localparam integer R_OVER_RHAT = (RHAT != 0) ? (R / RHAT) : 1;
+    localparam integer USE_MIXED_MAP = (RHAT > 1);
 
     function integer map_mixed;
         input integer base;
@@ -50,12 +51,12 @@ module interconnect_bank_out #(
     endgenerate
 
     // Single-radix: circular shift (iselect + k) mod R.
-    // Mixed-radix: use Algorithm-7 permutation index map_mixed(k).
+    // When RHAT>1, bank-index ordering follows the mixed permutation.
     genvar k;
     generate
         for (k = 0; k < R; k = k + 1) begin : gen_out
             assign operands_out[k*DWIDTH +: DWIDTH] =
-                bank_arr[(iselect + (is_Rhat_stage ? map_mixed(k) : k)) % R];
+                bank_arr[(iselect + (USE_MIXED_MAP ? map_mixed(k) : k)) % R];
         end
     endgenerate
 endmodule
@@ -72,6 +73,7 @@ module interconnect_bank_addr #(
     output wire [R*AWIDTH-1:0]  selected_addrs  // Addresses routed to each bank
 );
     localparam integer R_OVER_RHAT = (RHAT != 0) ? (R / RHAT) : 1;
+    localparam integer USE_MIXED_MAP = (RHAT > 1);
 
     function integer map_mixed;
         input integer base;
@@ -87,6 +89,20 @@ module interconnect_bank_addr #(
         end
     endfunction
 
+    function integer map_mixed_inv;
+        input integer base;
+        integer mi, mj;
+        begin
+            if ((RHAT > 1) && (R_OVER_RHAT > 0)) begin
+                mi = base / RHAT;
+                mj = base % RHAT;
+                map_mixed_inv = mj * R_OVER_RHAT + mi;
+            end else begin
+                map_mixed_inv = base;
+            end
+        end
+    endfunction
+
     wire [AWIDTH-1:0] raw_arr [0:R-1];
     genvar i;
     generate
@@ -96,13 +112,13 @@ module interconnect_bank_addr #(
     endgenerate
 
     // Single-radix: bank j gets raw_addr[(j + R - iselect) % R].
-    // Mixed-radix: apply map_mixed() to the index above.
+    // When RHAT>1, apply inverse mixed permutation on write-address routing.
     genvar j;
     generate
         for (j = 0; j < R; j = j + 1) begin : gen_addr
             wire [$clog2(R)-1:0] base_idx = (j + R - iselect) % R;
             assign selected_addrs[j*AWIDTH +: AWIDTH] =
-                raw_arr[is_Rhat_stage ? map_mixed(base_idx) : base_idx];
+                raw_arr[USE_MIXED_MAP ? map_mixed_inv(base_idx) : base_idx];
         end
     endgenerate
 endmodule
@@ -119,6 +135,7 @@ module interconnect_bank_in #(
     output wire [R*DWIDTH-1:0]  bank_data_in    // Data to write to each bank
 );
     localparam integer R_OVER_RHAT = (RHAT != 0) ? (R / RHAT) : 1;
+    localparam integer USE_MIXED_MAP = (RHAT > 1);
 
     function integer map_mixed;
         input integer base;
@@ -134,6 +151,20 @@ module interconnect_bank_in #(
         end
     endfunction
 
+    function integer map_mixed_inv;
+        input integer base;
+        integer mi, mj;
+        begin
+            if ((RHAT > 1) && (R_OVER_RHAT > 0)) begin
+                mi = base / RHAT;
+                mj = base % RHAT;
+                map_mixed_inv = mj * R_OVER_RHAT + mi;
+            end else begin
+                map_mixed_inv = base;
+            end
+        end
+    endfunction
+
     wire [DWIDTH-1:0] op_arr [0:R-1];
     genvar i;
     generate
@@ -143,13 +174,13 @@ module interconnect_bank_in #(
     endgenerate
 
     // Single-radix: bank j receives operand[(j + R - iselect) % R].
-    // Mixed-radix: apply map_mixed() to the index above.
+    // When RHAT>1, apply inverse mixed permutation on write-data routing.
     genvar j;
     generate
         for (j = 0; j < R; j = j + 1) begin : gen_in
             wire [$clog2(R)-1:0] base_idx = (j + R - iselect) % R;
             assign bank_data_in[j*DWIDTH +: DWIDTH] =
-                op_arr[is_Rhat_stage ? map_mixed(base_idx) : base_idx];
+                op_arr[USE_MIXED_MAP ? map_mixed_inv(base_idx) : base_idx];
         end
     endgenerate
 endmodule

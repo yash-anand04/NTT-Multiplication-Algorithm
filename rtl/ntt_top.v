@@ -193,13 +193,21 @@ module ntt_top #(
 
     wire [AWIDTH-1:0] seq_addr = seq_cnt[LOGN-1:LOGR];   // upper bits = row
     // Bank mapping must match addr_gen's conflict-free layout (sum of LOGR-bit groups mod R).
+    localparam integer FULL_GROUPS = LOGN / LOGR;
+    localparam integer REM_BITS    = LOGN - (FULL_GROUPS * LOGR);
     reg  [LOGR-1:0]   seq_bank;
+    reg  [LOGR-1:0]   seq_bank_rem;
     reg  [LOGR+3:0]   seq_bank_acc;
     integer sb_i;
     always @(*) begin
+        seq_bank_rem = {LOGR{1'b0}};
         seq_bank_acc = {LOGR+4{1'b0}};
-        for (sb_i = 0; sb_i < LOGN/LOGR; sb_i = sb_i + 1)
+        for (sb_i = 0; sb_i < FULL_GROUPS; sb_i = sb_i + 1)
             seq_bank_acc = seq_bank_acc + seq_cnt[sb_i*LOGR +: LOGR];
+        if (REM_BITS > 0) begin
+            seq_bank_rem[REM_BITS-1:0] = seq_cnt[FULL_GROUPS*LOGR +: REM_BITS];
+            seq_bank_acc = seq_bank_acc + seq_bank_rem;
+        end
         seq_bank = seq_bank_acc[LOGR-1:0];
     end
 
@@ -289,6 +297,18 @@ module ntt_top #(
                 .A0 (r2ntt_out0), .A1(r2ntt_out1), .A2(r2ntt_out2), .A3(r2ntt_out3)
             );
             assign ntt_result_d1 = {r2ntt_out3, r2ntt_out2, r2ntt_out1, r2ntt_out0};
+        end else if (R == 8) begin : gen_r2ntt_r8
+            r2ntt_r8 #(.B(B), .N(N)) u_r2ntt8 (
+                .in_d1        (ntt_d1_in),
+                .is_Rhat_stage(is_Rhat_stage),
+                .out_d1       (ntt_result_d1)
+            );
+        end else if (R == 16) begin : gen_r2ntt_r16
+            r2ntt_r16 #(.B(B)) u_r2ntt16 (
+                .in_d1        (ntt_d1_in),
+                .is_Rhat_stage(is_Rhat_stage),
+                .out_d1       (ntt_result_d1)
+            );
         end else begin : gen_r2ntt_generic
             r2ntt_generic #(.B(B), .N(N), .R(R)) u_r2ntt_g (
                 .in_d1        (ntt_d1_in),
@@ -334,6 +354,18 @@ module ntt_top #(
                 .a0 (r2intt_out0), .a1(r2intt_out1), .a2(r2intt_out2), .a3(r2intt_out3)
             );
             assign intt_d1_out = {r2intt_out3, r2intt_out2, r2intt_out1, r2intt_out0};
+        end else if (R == 8) begin : gen_r2intt_r8
+            r2intt_r8 #(.B(B), .N(N)) u_r2intt8 (
+                .in_d1        (intt_d1_in),
+                .is_Rhat_stage(is_Rhat_stage),
+                .out_d1       (intt_d1_out)
+            );
+        end else if (R == 16) begin : gen_r2intt_r16
+            r2intt_r16 #(.B(B)) u_r2intt16 (
+                .in_d1        (intt_d1_in),
+                .is_Rhat_stage(is_Rhat_stage),
+                .out_d1       (intt_d1_out)
+            );
         end else begin : gen_r2intt_generic
             r2intt_generic #(.B(B), .N(N), .R(R)) u_r2intt_g (
                 .in_d1        (intt_d1_in),

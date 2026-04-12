@@ -10,7 +10,11 @@ This repository contains:
 ## Current status
 
 - Functional output correctness is verified in simulation with random, impulse, and identity vector tests.
-- The implementation is currently configured for R = 4.
+- End-to-end regression matrix coverage now includes R = 4, 8, and 16 via `sim/run_regression_matrix.py`.
+- Current validated results:
+	- R = 4: random/impulse/identity all pass (256/256)
+	- R = 8: random/impulse/identity all pass (256/256)
+	- R = 16: random/impulse/identity all pass (256/256)
 
 ## Repository layout
 ```
@@ -28,8 +32,13 @@ This repository contains:
 |   |-- mod_mul_fermat.v
 |   |-- ntt_top.v
 |   |-- r2_butterfly.v
+|   |-- r2intt_butterfly_pow2.v
+|   |-- r2intt_r16.v
 |   |-- r2intt_r4.v
+|   |-- r2intt_r8.v
+|   |-- r2ntt_r16.v
 |   |-- r2ntt_r4.v
+|   |-- r2ntt_r8.v
 |   `-- twiddle_rom.v
 |-- scripts/
 |   `-- golden_model.py
@@ -39,6 +48,7 @@ This repository contains:
 |   |-- expected_out.hex
 |   |-- twiddle_factors.hex
 |   |-- gen_impulse_vectors.py
+|   |-- run_regression_matrix.py
 |   |-- bin/                     (generated simulation artifacts)
 |   `-- testbenches/
 |       |-- tb_ntt_capture.v
@@ -54,7 +64,7 @@ This repository contains:
 - Icarus Verilog (`iverilog` and `vvp`) available in PATH
 - PowerShell (commands below are PowerShell examples)
 
-## Testbenches retained
+## Testbenches 
 
 1. `tb_ntt_capture.v`
 	- End-to-end top-level regression test for `ntt_top`.
@@ -107,6 +117,58 @@ vvp ./a.out
 iverilog -g2009 -I../rtl testbenches/tb_twiddle_rom_test.v ../rtl/*.v -o a.out
 vvp ./a.out
 ```
+
+## Regression matrix (R=4/8/16)
+
+From `sim/`:
+
+```powershell
+$py = "../venv/Scripts/python.exe"
+& $py run_regression_matrix.py --radices 4 8 16 --cases random impulse identity
+```
+
+This command:
+- Generates/updates vectors per case.
+- Compiles `tb_ntt_capture.v` with `R` selected via `-DR_VAL=<radix>`.
+- Runs end-to-end checks and prints `matches/256` per case and radix.
+
+### Vector definitions
+
+- random:
+	- `a` and `b` are dense pseudo-random polynomials over `[0, q-1]`.
+	- Expected output is computed by direct negacyclic convolution in `scripts/golden_model.py`.
+- impulse:
+	- `a = [1, 0, 0, ..., 0]`, `b = [1, 0, 0, ..., 0]`.
+	- Expected output is `[1, 0, 0, ..., 0]`.
+- identity:
+	- `a` is pseudo-random, `b = [1, 0, 0, ..., 0]`.
+	- Expected output is exactly `a`.
+
+These three cases are complementary:
+- random stresses the full arithmetic and routing path.
+- impulse checks basis-response and index/sign correctness.
+- identity checks end-to-end preservation through NTT/PWM/INTT when multiplied by the multiplicative identity.
+
+## Broad randomized campaign testbench
+
+Use `tb_ntt_random_campaign.v` to run many end-to-end random trials in one simulation. The testbench:
+- Generates random `a` and `b` vectors per case.
+- Computes expected output internally with direct negacyclic convolution.
+- Streams vectors through `ntt_top` and self-checks all 256 outputs.
+- Fails simulation with `$fatal` if any case mismatches.
+
+From `sim/`:
+
+```powershell
+# Example: 50 random cases at R=8
+iverilog -g2009 -I../rtl -DR_VAL=8 -DCAMPAIGN_CASES=50 testbenches/tb_ntt_random_campaign.v ../rtl/*.v -o bin/tb_ntt_random_campaign_r8
+vvp ./bin/tb_ntt_random_campaign_r8
+```
+
+Optional compile-time knobs:
+- `R_VAL` (default `4`)
+- `CAMPAIGN_CASES` (default `50`)
+- `CAMPAIGN_SEED_A` and `CAMPAIGN_SEED_B` for reproducible random streams
 
 ## Notes
 
