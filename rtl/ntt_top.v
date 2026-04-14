@@ -23,7 +23,21 @@ module ntt_top #(
     parameter LOGR   = $clog2(R),       // 2
     parameter AWIDTH = LOGN - LOGR,     // 6  (bank address bits)
     parameter DWIDTH = 2 * (B + 1),     // 34 (lower+upper poly word)
-    parameter WWIDTH = B + 1            // 17 (one coefficient)
+    parameter WWIDTH = B + 1,           // 17 (one coefficient)
+    // Paper-aligned area mode switches:
+    // - BRAM-style synchronous read for memory banks
+    // - deeper pipelined modular multiplication + optional input register
+    parameter PAPER_AREA_MODE   = 0,
+    parameter MEM_SYNC_READ     = PAPER_AREA_MODE ? 1 : 0,
+    // Backward-compatible switch: kept for external overrides.
+    parameter MODMUL_PIPELINED  = PAPER_AREA_MODE ? 1 : 0,
+    // Extra FF insertion knobs for Fmax tuning.
+    parameter MODMUL_INPUT_REG  = PAPER_AREA_MODE ? 1 : 0,
+    parameter MODMUL_PIPE_STAGES = PAPER_AREA_MODE ? 2 : (MODMUL_PIPELINED ? 1 : 0),
+    parameter WRITEBACK_DELAY   = 2 + MEM_SYNC_READ + MODMUL_INPUT_REG + MODMUL_PIPE_STAGES,
+    // Stage-boundary flush spacing.
+    // Area mode uses a safer default because of added datapath latency.
+    parameter PIPE_LATENCY = PAPER_AREA_MODE ? ((R >= 16) ? 5 : 3) : ((R >= 16) ? 3 : 1)
 )(
     input  wire             clk,
     input  wire             rst,
@@ -43,13 +57,21 @@ module ntt_top #(
     wire [1:0]         rd_sel, wr_sel;
     wire               ntt_mode, pwm_en;
     wire [R-1:0]       ctrl_bank_we;
+    wire               output_prefetch;
 
     // Expose the FSM state so ntt_top can decode LOAD / OUTPUT
     wire [2:0]         fsm_state;
+    reg  [LOGR-1:0]    iselect_q;
+    reg                is_Rhat_stage_q;
+    reg  [1:0]         rd_sel_q;
+    reg  [1:0]         wr_sel_q;
+    reg                ntt_mode_q;
+    reg                pwm_en_q;
 
     ctrl_unit #(
         .N(N), .R(R), .LOGN(LOGN), .LOGR(LOGR),
-        .STAGES(LOGN/LOGR), .DEPTH(N/R), .AWIDTH(AWIDTH)
+        .STAGES(LOGN/LOGR), .DEPTH(N/R), .AWIDTH(AWIDTH),
+        .PIPE_LATENCY(PIPE_LATENCY)
     ) u_ctrl (
         .clk           (clk),
         .rst           (rst),
@@ -63,7 +85,8 @@ module ntt_top #(
         .pwm_en        (pwm_en),
         .bank_we       (ctrl_bank_we),
         .done          (done),
-        .fsm_state     (fsm_state)
+        .fsm_state     (fsm_state),
+        .output_prefetch(output_prefetch)
     );
 
     localparam ST_IDLE   = 3'd0,
@@ -80,6 +103,8 @@ module ntt_top #(
     localparam integer RHAT          = (R_POW_STAGES != 0) ? (N / R_POW_STAGES) : 1;
     localparam integer R_OVER_RHAT   = (RHAT != 0) ? (R / RHAT) : 1;
     localparam integer SUPPORTS_RHAT = (RHAT > 1) && (R_OVER_RHAT == 2);
+    localparam integer MM_LAT        = MODMUL_INPUT_REG + MODMUL_PIPE_STAGES;
+    localparam integer MAX_MM_LAT    = 8;
     localparam [WWIDTH-1:0] TW_ONE   = {{(WWIDTH-1){1'b0}}, 1'b1};
 
     function [LOGN-1:0] bit_reverse;
@@ -158,10 +183,15 @@ module ntt_top #(
         end
     endgenerate
 
-    wire [R*WWIDTH-1:0] tw_factors_ntt_sel;
-    wire [R*WWIDTH-1:0] tw_factors_intt_sel;
-    assign tw_factors_ntt_sel  = (is_Rhat_stage && SUPPORTS_RHAT) ? tw_rhat_pack     : tw_factors;
-    assign tw_factors_intt_sel = (is_Rhat_stage && SUPPORTS_RHAT) ? tw_rhat_pack_inv : tw_factors_inv;
+    reg [R*WWIDTH-1:0] tw_factors_q;
+    reg [R*WWIDTH-1:0] tw_factors_inv_q;
+    reg [R*WWIDTH-1:0] tw_rhat_pack_q;
+    reg [R*WWIDTH-1:0] tw_rhat_pack_inv_q;
+
+    wire [R*WWIDTH-1:0] tw_factors_ntt_pipe;
+    wire [R*WWIDTH-1:0] tw_factors_intt_pipe;
+    assign tw_factors_ntt_pipe  = (is_Rhat_stage_q && SUPPORTS_RHAT) ? tw_rhat_pack_q     : tw_factors_q;
+    assign tw_factors_intt_pipe = (is_Rhat_stage_q && SUPPORTS_RHAT) ? tw_rhat_pack_inv_q : tw_factors_inv_q;
 
     // =========================================================================
     // ADDRESS GENERATOR  (used during NTT / INTT / PWM)
@@ -175,6 +205,32 @@ module ntt_top #(
         .iselect    (iselect),
         .bank_addrs (bank_addrs_raw)
     );
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            iselect_q       <= {LOGR{1'b0}};
+            is_Rhat_stage_q <= 1'b0;
+            rd_sel_q        <= 2'b00;
+            wr_sel_q        <= 2'b00;
+            ntt_mode_q      <= 1'b0;
+            pwm_en_q        <= 1'b0;
+            tw_factors_q    <= {R*WWIDTH{1'b0}};
+            tw_factors_inv_q <= {R*WWIDTH{1'b0}};
+            tw_rhat_pack_q <= {R*WWIDTH{1'b0}};
+            tw_rhat_pack_inv_q <= {R*WWIDTH{1'b0}};
+        end else begin
+            iselect_q       <= iselect;
+            is_Rhat_stage_q <= is_Rhat_stage;
+            rd_sel_q        <= rd_sel;
+            wr_sel_q        <= wr_sel;
+            ntt_mode_q      <= ntt_mode;
+            pwm_en_q        <= pwm_en;
+            tw_factors_q    <= tw_factors;
+            tw_factors_inv_q <= tw_factors_inv;
+            tw_rhat_pack_q <= tw_rhat_pack;
+            tw_rhat_pack_inv_q <= tw_rhat_pack_inv;
+        end
+    end
 
     // =========================================================================
     // LOAD / OUTPUT sequential address counter
@@ -221,7 +277,8 @@ module ntt_top #(
     wire [R*AWIDTH-1:0]  bank_raddr;
 
     mem_banks #(
-        .B(B), .N(N), .R(R), .DEPTH(N/R), .DWIDTH(DWIDTH), .AWIDTH(AWIDTH)
+        .B(B), .N(N), .R(R), .DEPTH(N/R), .DWIDTH(DWIDTH), .AWIDTH(AWIDTH),
+        .SYNC_READ(MEM_SYNC_READ)
     ) u_membanks (
         .clk        (clk),
         .bank_we    (bank_we),
@@ -242,15 +299,106 @@ module ntt_top #(
         .operands_out  (operands_out)
     );
 
+    reg [R*DWIDTH-1:0] operands_out_q;
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            operands_out_q <= {R*DWIDTH{1'b0}};
+        else
+            operands_out_q <= operands_out;
+    end
+
+    // Optional alignment pipeline used by deeper modmul staging.
+    reg [R*DWIDTH-1:0]  operands_mm_pipe [0:MAX_MM_LAT-1];
+    reg [LOGR-1:0]      iselect_mm_pipe  [0:MAX_MM_LAT-1];
+    reg                 is_rhat_mm_pipe  [0:MAX_MM_LAT-1];
+    reg [1:0]           rd_sel_mm_pipe   [0:MAX_MM_LAT-1];
+    reg [1:0]           wr_sel_mm_pipe   [0:MAX_MM_LAT-1];
+    reg                 ntt_mode_mm_pipe [0:MAX_MM_LAT-1];
+    reg                 pwm_en_mm_pipe   [0:MAX_MM_LAT-1];
+    reg [R*WWIDTH-1:0]  tw_ntt_mm_pipe   [0:MAX_MM_LAT-1];
+    reg [R*WWIDTH-1:0]  tw_intt_mm_pipe  [0:MAX_MM_LAT-1];
+    integer mm_i;
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            for (mm_i = 0; mm_i < MAX_MM_LAT; mm_i = mm_i + 1) begin
+                operands_mm_pipe[mm_i] <= {R*DWIDTH{1'b0}};
+                iselect_mm_pipe[mm_i]  <= {LOGR{1'b0}};
+                is_rhat_mm_pipe[mm_i]  <= 1'b0;
+                rd_sel_mm_pipe[mm_i]   <= 2'b00;
+                wr_sel_mm_pipe[mm_i]   <= 2'b00;
+                ntt_mode_mm_pipe[mm_i] <= 1'b0;
+                pwm_en_mm_pipe[mm_i]   <= 1'b0;
+                tw_ntt_mm_pipe[mm_i]   <= {R*WWIDTH{1'b0}};
+                tw_intt_mm_pipe[mm_i]  <= {R*WWIDTH{1'b0}};
+            end
+        end else begin
+            operands_mm_pipe[0] <= operands_out_q;
+            iselect_mm_pipe[0]  <= iselect_q;
+            is_rhat_mm_pipe[0]  <= is_Rhat_stage_q;
+            rd_sel_mm_pipe[0]   <= rd_sel_q;
+            wr_sel_mm_pipe[0]   <= wr_sel_q;
+            ntt_mode_mm_pipe[0] <= ntt_mode_q;
+            pwm_en_mm_pipe[0]   <= pwm_en_q;
+            tw_ntt_mm_pipe[0]   <= tw_factors_ntt_pipe;
+            tw_intt_mm_pipe[0]  <= tw_factors_intt_pipe;
+            for (mm_i = 1; mm_i < MAX_MM_LAT; mm_i = mm_i + 1) begin
+                operands_mm_pipe[mm_i] <= operands_mm_pipe[mm_i-1];
+                iselect_mm_pipe[mm_i]  <= iselect_mm_pipe[mm_i-1];
+                is_rhat_mm_pipe[mm_i]  <= is_rhat_mm_pipe[mm_i-1];
+                rd_sel_mm_pipe[mm_i]   <= rd_sel_mm_pipe[mm_i-1];
+                wr_sel_mm_pipe[mm_i]   <= wr_sel_mm_pipe[mm_i-1];
+                ntt_mode_mm_pipe[mm_i] <= ntt_mode_mm_pipe[mm_i-1];
+                pwm_en_mm_pipe[mm_i]   <= pwm_en_mm_pipe[mm_i-1];
+                tw_ntt_mm_pipe[mm_i]   <= tw_ntt_mm_pipe[mm_i-1];
+                tw_intt_mm_pipe[mm_i]  <= tw_intt_mm_pipe[mm_i-1];
+            end
+        end
+    end
+
+    // Signals aligned to modmul inputs (optional +1 cycle when MODMUL_INPUT_REG=1).
+    wire [R*DWIDTH-1:0] op_word_mm      = MODMUL_INPUT_REG ? operands_mm_pipe[0] : operands_out_q;
+    wire [R*WWIDTH-1:0] tw_ntt_mm       = MODMUL_INPUT_REG ? tw_ntt_mm_pipe[0]    : tw_factors_ntt_pipe;
+    wire [R*WWIDTH-1:0] tw_intt_mm      = MODMUL_INPUT_REG ? tw_intt_mm_pipe[0]   : tw_factors_intt_pipe;
+    wire [1:0]          rd_sel_mm       = MODMUL_INPUT_REG ? rd_sel_mm_pipe[0]    : rd_sel_q;
+    wire                is_rhat_mm      = MODMUL_INPUT_REG ? is_rhat_mm_pipe[0]   : is_Rhat_stage_q;
+
+    // Signals aligned to modmul outputs (for write-data selection/routing).
+    wire [R*DWIDTH-1:0] op_word_wb;
+    wire [LOGR-1:0]     iselect_wb;
+    wire                is_rhat_wb;
+    wire [1:0]          wr_sel_wb;
+    wire                ntt_mode_wb;
+    wire                pwm_en_wb;
+    generate
+        if (MM_LAT == 0) begin : gen_mm_lat0
+            assign op_word_wb  = operands_out_q;
+            assign iselect_wb  = iselect_q;
+            assign is_rhat_wb  = is_Rhat_stage_q;
+            assign wr_sel_wb   = wr_sel_q;
+            assign ntt_mode_wb = ntt_mode_q;
+            assign pwm_en_wb   = pwm_en_q;
+        end else begin : gen_mm_latn
+            assign op_word_wb  = operands_mm_pipe[MM_LAT-1];
+            assign iselect_wb  = iselect_mm_pipe[MM_LAT-1];
+            assign is_rhat_wb  = is_rhat_mm_pipe[MM_LAT-1];
+            assign wr_sel_wb   = wr_sel_mm_pipe[MM_LAT-1];
+            assign ntt_mode_wb = ntt_mode_mm_pipe[MM_LAT-1];
+            assign pwm_en_wb   = pwm_en_mm_pipe[MM_LAT-1];
+        end
+    endgenerate
+
     // =========================================================================
     // EXTRACT LOWER / UPPER HALVES from operands
     // =========================================================================
-    wire [R*WWIDTH-1:0]  op_lower, op_upper;
+    wire [R*WWIDTH-1:0]  op_lower_mm, op_upper_mm;
+    wire [R*WWIDTH-1:0]  op_lower_wb, op_upper_wb;
     genvar gi;
     generate
         for (gi = 0; gi < R; gi = gi + 1) begin : gen_op_extract
-            assign op_lower[gi*WWIDTH +: WWIDTH] = operands_out[gi*DWIDTH +:         WWIDTH];
-            assign op_upper[gi*WWIDTH +: WWIDTH] = operands_out[gi*DWIDTH + WWIDTH +: WWIDTH];
+            assign op_lower_mm[gi*WWIDTH +: WWIDTH] = op_word_mm[gi*DWIDTH +:         WWIDTH];
+            assign op_upper_mm[gi*WWIDTH +: WWIDTH] = op_word_mm[gi*DWIDTH + WWIDTH +: WWIDTH];
+            assign op_lower_wb[gi*WWIDTH +: WWIDTH] = op_word_wb[gi*DWIDTH +:         WWIDTH];
+            assign op_upper_wb[gi*WWIDTH +: WWIDTH] = op_word_wb[gi*DWIDTH + WWIDTH +: WWIDTH];
         end
     endgenerate
 
@@ -259,16 +407,16 @@ module ntt_top #(
     // rd_sel selects which polynomial half is read by NTT:
     //   2'b01 -> lower (NTT1), 2'b10 -> upper (NTT2)
     // =========================================================================
-    wire [R*WWIDTH-1:0]  modmul_ntt_in = (rd_sel == 2'b10) ? op_upper : op_lower;
+    wire [R*WWIDTH-1:0]  modmul_ntt_in = (rd_sel_mm == 2'b10) ? op_upper_mm : op_lower_mm;
 
     wire [R*WWIDTH-1:0]  mm_ntt_out;
     generate
         for (gi = 0; gi < R; gi = gi + 1) begin : gen_modmul_ntt
-            mod_mul_fermat #(B) u_mm (
+            mod_mul_fermat #(.B(B), .PIPE_STAGES(MODMUL_PIPE_STAGES)) u_mm (
                 .clk    (clk),
                 .rst    (rst),
                 .a      (modmul_ntt_in[gi*WWIDTH +: WWIDTH]),
-                .b      (tw_factors_ntt_sel[gi*WWIDTH +: WWIDTH]),
+                .b      (tw_ntt_mm[gi*WWIDTH +: WWIDTH]),
                 .result (mm_ntt_out[gi*WWIDTH +: WWIDTH])
             );
         end
@@ -293,26 +441,26 @@ module ntt_top #(
                 .a1 (ntt_d1_in[1*WWIDTH +: WWIDTH]),
                 .a2 (ntt_d1_in[2*WWIDTH +: WWIDTH]),
                 .a3 (ntt_d1_in[3*WWIDTH +: WWIDTH]),
-                .is_Rhat_stage (is_Rhat_stage),
+                .is_Rhat_stage (is_rhat_mm),
                 .A0 (r2ntt_out0), .A1(r2ntt_out1), .A2(r2ntt_out2), .A3(r2ntt_out3)
             );
             assign ntt_result_d1 = {r2ntt_out3, r2ntt_out2, r2ntt_out1, r2ntt_out0};
         end else if (R == 8) begin : gen_r2ntt_r8
             r2ntt_r8 #(.B(B), .N(N)) u_r2ntt8 (
                 .in_d1        (ntt_d1_in),
-                .is_Rhat_stage(is_Rhat_stage),
+                .is_Rhat_stage(is_rhat_mm),
                 .out_d1       (ntt_result_d1)
             );
         end else if (R == 16) begin : gen_r2ntt_r16
             r2ntt_r16 #(.B(B)) u_r2ntt16 (
                 .in_d1        (ntt_d1_in),
-                .is_Rhat_stage(is_Rhat_stage),
+                .is_Rhat_stage(is_rhat_mm),
                 .out_d1       (ntt_result_d1)
             );
         end else begin : gen_r2ntt_generic
             r2ntt_generic #(.B(B), .N(N), .R(R)) u_r2ntt_g (
                 .in_d1        (ntt_d1_in),
-                .is_Rhat_stage(is_Rhat_stage),
+                .is_Rhat_stage(is_rhat_mm),
                 .out_d1       (ntt_result_d1)
             );
         end
@@ -335,7 +483,7 @@ module ntt_top #(
     generate
         for (gi = 0; gi < R; gi = gi + 1) begin : gen_intt_n2d1
             norm_to_d1 #(B) u_intt_n2d1 (
-                .in  (op_lower[gi*WWIDTH +: WWIDTH]),
+                .in  (op_lower_mm[gi*WWIDTH +: WWIDTH]),
                 .out (intt_d1_in[gi*WWIDTH +: WWIDTH])
             );
         end
@@ -350,26 +498,26 @@ module ntt_top #(
                 .A1 (intt_d1_in[1*WWIDTH +: WWIDTH]),
                 .A2 (intt_d1_in[2*WWIDTH +: WWIDTH]),
                 .A3 (intt_d1_in[3*WWIDTH +: WWIDTH]),
-                .is_Rhat_stage (is_Rhat_stage),
+                .is_Rhat_stage (is_rhat_mm),
                 .a0 (r2intt_out0), .a1(r2intt_out1), .a2(r2intt_out2), .a3(r2intt_out3)
             );
             assign intt_d1_out = {r2intt_out3, r2intt_out2, r2intt_out1, r2intt_out0};
         end else if (R == 8) begin : gen_r2intt_r8
             r2intt_r8 #(.B(B), .N(N)) u_r2intt8 (
                 .in_d1        (intt_d1_in),
-                .is_Rhat_stage(is_Rhat_stage),
+                .is_Rhat_stage(is_rhat_mm),
                 .out_d1       (intt_d1_out)
             );
         end else if (R == 16) begin : gen_r2intt_r16
             r2intt_r16 #(.B(B)) u_r2intt16 (
                 .in_d1        (intt_d1_in),
-                .is_Rhat_stage(is_Rhat_stage),
+                .is_Rhat_stage(is_rhat_mm),
                 .out_d1       (intt_d1_out)
             );
         end else begin : gen_r2intt_generic
             r2intt_generic #(.B(B), .N(N), .R(R)) u_r2intt_g (
                 .in_d1        (intt_d1_in),
-                .is_Rhat_stage(is_Rhat_stage),
+                .is_Rhat_stage(is_rhat_mm),
                 .out_d1       (intt_d1_out)
             );
         end
@@ -387,11 +535,11 @@ module ntt_top #(
     wire [R*WWIDTH-1:0] mm_intt_out;
     generate
         for (gi = 0; gi < R; gi = gi + 1) begin : gen_modmul_intt
-            mod_mul_fermat #(B) u_mm_intt (
+            mod_mul_fermat #(.B(B), .PIPE_STAGES(MODMUL_PIPE_STAGES)) u_mm_intt (
                 .clk    (clk),
                 .rst    (rst),
                 .a      (intt_norm[gi*WWIDTH +: WWIDTH]),
-                .b      (tw_factors_intt_sel[gi*WWIDTH +: WWIDTH]),
+                .b      (tw_intt_mm[gi*WWIDTH +: WWIDTH]),
                 .result (mm_intt_out[gi*WWIDTH +: WWIDTH])
             );
         end
@@ -403,11 +551,11 @@ module ntt_top #(
     wire [R*WWIDTH-1:0] pwm_out;
     generate
         for (gi = 0; gi < R; gi = gi + 1) begin : gen_pwm_mul
-            mod_mul_fermat #(B) u_mm_pwm (
+            mod_mul_fermat #(.B(B), .PIPE_STAGES(MODMUL_PIPE_STAGES)) u_mm_pwm (
                 .clk    (clk),
                 .rst    (rst),
-                .a      (op_lower[gi*WWIDTH +: WWIDTH]),
-                .b      (op_upper[gi*WWIDTH +: WWIDTH]),
+                .a      (op_lower_mm[gi*WWIDTH +: WWIDTH]),
+                .b      (op_upper_mm[gi*WWIDTH +: WWIDTH]),
                 .result (pwm_out[gi*WWIDTH +: WWIDTH])
             );
         end
@@ -423,29 +571,24 @@ module ntt_top #(
     // =========================================================================
     wire [DWIDTH-1:0]    load_word = {data_in_b, data_in_a};
 
-    // Butterfly result selection (shared across R elements)
-    // NOTE: pwm_out and mm_intt_out are pipelined by 2 cycles (mod_mul_fermat);
-    //       ntt_result is combinational (r2ntt adds only shift+add, no registers).
-    //       For NTT stages: result is available immediately, no latency.
-    //       For INTT and PWM: ModMul adds 2-cycle latency — controlled by stalls
-    //       in ctrl_unit via PIPE_LATENCY. Since ctrl_unit doesn't currently stall,
-    //       we use the combinational NTT result for NTT1/NTT2.
-    wire [R*WWIDTH-1:0]  bfly_result = pwm_en    ? pwm_out :
-                                        ntt_mode  ? ntt_result :
-                                                    mm_intt_out;
+    // Butterfly result selection (shared across R elements).
+    // In area mode, data/control/twiddle are aligned through MM_LAT cycles.
+    wire [R*WWIDTH-1:0]  bfly_result = pwm_en_wb   ? pwm_out :
+                                        ntt_mode_wb ? ntt_result :
+                                                      mm_intt_out;
 
     // Pack butterfly results into DWIDTH words (preserve the appropriate half)
     wire [R*DWIDTH-1:0]  bfly_data_pre;   // before bank-in interconnect routing
     generate
         for (gi = 0; gi < R; gi = gi + 1) begin : gen_bfly_pack
             wire [WWIDTH-1:0] rw = bfly_result[gi*WWIDTH +: WWIDTH];
-            wire [WWIDTH-1:0] cur_l = op_lower[gi*WWIDTH +: WWIDTH];
-            wire [WWIDTH-1:0] cur_u = op_upper[gi*WWIDTH +: WWIDTH];
+            wire [WWIDTH-1:0] cur_l = op_lower_wb[gi*WWIDTH +: WWIDTH];
+            wire [WWIDTH-1:0] cur_u = op_upper_wb[gi*WWIDTH +: WWIDTH];
             // Preserve the non-target half to avoid corrupting the other polynomial.
             assign bfly_data_pre[gi*DWIDTH +: DWIDTH] =
-                (wr_sel == 2'b10) ? {rw,    cur_l} :   // update upper only
-                (wr_sel == 2'b01) ? {cur_u, rw   } :   // update lower only
-                                    operands_out[gi*DWIDTH +: DWIDTH];
+                (wr_sel_wb == 2'b10) ? {rw,    cur_l} :   // update upper only
+                (wr_sel_wb == 2'b01) ? {cur_u, rw   } :   // update lower only
+                                       op_word_wb[gi*DWIDTH +: DWIDTH];
         end
     endgenerate
 
@@ -456,11 +599,11 @@ module ntt_top #(
     // =========================================================================
     wire [R*DWIDTH-1:0]  bfly_data_routed;
 
-    // With combinational ModMul, iselect is valid for the same cycle's results.
+    // iselect_wb/is_rhat_wb align with the selected datapath latency.
     interconnect_bank_in #(.DWIDTH(DWIDTH), .R(R), .RHAT(RHAT)) u_icon_in (
         .operands_in  (bfly_data_pre),
-        .iselect      (iselect),
-        .is_Rhat_stage(is_Rhat_stage),
+        .iselect      (iselect_wb),
+        .is_Rhat_stage(is_rhat_wb),
         .bank_data_in (bfly_data_routed)
     );
 
@@ -473,11 +616,20 @@ module ntt_top #(
         end
     endgenerate
 
+    // Register compute write-back payload to break long comb paths into BRAM ports.
+    reg [R*DWIDTH-1:0] bfly_data_routed_q;
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            bfly_data_routed_q <= {R*DWIDTH{1'b0}};
+        else
+            bfly_data_routed_q <= bfly_data_routed;
+    end
+
     // Final bank_din mux
-    assign bank_din = is_load ? load_data : bfly_data_routed;
+    assign bank_din = is_load ? load_data : bfly_data_routed_q;
 
     // =========================================================================
-    // BANK WRITE ADDRESS  (combinational path: no pipeline delay)
+    // BANK WRITE ADDRESS
     // =========================================================================
     wire [R*AWIDTH-1:0]  ntt_waddr;
     interconnect_bank_addr #(.AWIDTH(AWIDTH), .R(R), .RHAT(RHAT)) u_icon_addr (
@@ -495,7 +647,21 @@ module ntt_top #(
         end
     endgenerate
 
-    assign bank_waddr = is_load ? load_waddr : ntt_waddr;
+    localparam integer WB_DELAY = WRITEBACK_DELAY;
+    reg [R*AWIDTH-1:0] ntt_waddr_pipe [0:WB_DELAY-1];
+    integer wb_i;
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            for (wb_i = 0; wb_i < WB_DELAY; wb_i = wb_i + 1)
+                ntt_waddr_pipe[wb_i] <= {R*AWIDTH{1'b0}};
+        end else begin
+            ntt_waddr_pipe[0] <= ntt_waddr;
+            for (wb_i = 1; wb_i < WB_DELAY; wb_i = wb_i + 1)
+                ntt_waddr_pipe[wb_i] <= ntt_waddr_pipe[wb_i-1];
+        end
+    end
+
+    assign bank_waddr = is_load ? load_waddr : ntt_waddr_pipe[WB_DELAY-1];
 
     // =========================================================================
     // BANK WRITE ENABLE  (direct from ctrl_unit each cycle)
@@ -507,7 +673,20 @@ module ntt_top #(
         end
     endgenerate
 
-    assign bank_we = is_load ? load_we : ctrl_bank_we;
+    reg [R-1:0] ctrl_bank_we_pipe [0:WB_DELAY-1];
+    integer we_i;
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            for (we_i = 0; we_i < WB_DELAY; we_i = we_i + 1)
+                ctrl_bank_we_pipe[we_i] <= {R{1'b0}};
+        end else begin
+            ctrl_bank_we_pipe[0] <= ctrl_bank_we;
+            for (we_i = 1; we_i < WB_DELAY; we_i = we_i + 1)
+                ctrl_bank_we_pipe[we_i] <= ctrl_bank_we_pipe[we_i-1];
+        end
+    end
+
+    assign bank_we = is_load ? load_we : ctrl_bank_we_pipe[WB_DELAY-1];
 
     // =========================================================================
     // BANK READ ADDRESS
@@ -521,7 +700,8 @@ module ntt_top #(
         end
     endgenerate
 
-    assign bank_raddr = is_output ? out_raddr : ntt_waddr;
+    wire output_prefetch_en = MEM_SYNC_READ && output_prefetch;
+    assign bank_raddr = (is_output || output_prefetch_en) ? out_raddr : ntt_waddr;
 
     // =========================================================================
     // OUTPUT: serial read from bank seq_bank, lower WWIDTH bits

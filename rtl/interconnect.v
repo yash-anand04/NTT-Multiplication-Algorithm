@@ -72,6 +72,7 @@ module interconnect_bank_addr #(
     input  wire                  is_Rhat_stage,
     output wire [R*AWIDTH-1:0]  selected_addrs  // Addresses routed to each bank
 );
+    localparam integer LOGR = $clog2(R);
     localparam integer R_OVER_RHAT = (RHAT != 0) ? (R / RHAT) : 1;
     localparam integer USE_MIXED_MAP = (RHAT > 1);
 
@@ -113,10 +114,12 @@ module interconnect_bank_addr #(
 
     // Single-radix: bank j gets raw_addr[(j + R - iselect) % R].
     // When RHAT>1, apply inverse mixed permutation on write-address routing.
+    // R is power-of-two in supported configurations (4/8/16), so subtraction on
+    // LOGR bits naturally wraps modulo R without an explicit % operator.
     genvar j;
     generate
         for (j = 0; j < R; j = j + 1) begin : gen_addr
-            wire [$clog2(R)-1:0] base_idx = (j + R - iselect) % R;
+            wire [LOGR-1:0] base_idx = j[LOGR-1:0] - iselect;
             assign selected_addrs[j*AWIDTH +: AWIDTH] =
                 raw_arr[USE_MIXED_MAP ? map_mixed_inv(base_idx) : base_idx];
         end

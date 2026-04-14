@@ -1,0 +1,7 @@
+run_id,seed,place_dir,phys_dir,post_phys_dir,wns
+1,1,ExtraPostPlacementOpt,AggressiveFanoutOpt,AggressiveExplore,-17.083
+2,1,Explore,Explore,Explore,-17.083
+3,11,ExtraPostPlacementOpt,AggressiveFanoutOpt,AggressiveExplore,-17.083
+4,11,Explore,Explore,Explore,-17.083
+5,23,ExtraPostPlacementOpt,AggressiveFanoutOpt,AggressiveExplore,-17.083
+6,23,Explore,Explore,Explore,-17.083

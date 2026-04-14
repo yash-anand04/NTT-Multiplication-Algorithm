@@ -18,7 +18,8 @@ module mem_banks #(
     parameter R     = 4,    // Radix (number of banks)
     parameter DEPTH = N/R,  // Entries per bank (=64 for N=256, R=4)
     parameter DWIDTH = 2*(B+1),  // Data width per entry (34 bits)
-    parameter AWIDTH = $clog2(DEPTH)  // Address bits (=6 for DEPTH=64)
+    parameter AWIDTH = $clog2(DEPTH), // Address bits (=6 for DEPTH=64)
+    parameter SYNC_READ = 0           // 1 => BRAM-style synchronous read
 )(
     input  wire                   clk,
     // Write port (one per bank)
@@ -32,16 +33,31 @@ module mem_banks #(
     genvar i;
     generate
         for (i = 0; i < R; i = i + 1) begin : gen_banks
-            // Simple banked memory with synchronous write and combinational read.
-            reg [DWIDTH-1:0] mem [0:DEPTH-1];
+            // Synthesis hint for FPGA mapping.
+            (* ram_style = "block" *) reg [DWIDTH-1:0] mem [0:DEPTH-1];
 
-            always @(posedge clk) begin
-                if (bank_we[i]) begin
-                    mem[bank_waddr[i*AWIDTH +: AWIDTH]] <= bank_din[i*DWIDTH +: DWIDTH];
+            if (SYNC_READ) begin : gen_sync_read
+                reg [DWIDTH-1:0] dout_q;
+
+                // BRAM-style: synchronous write and synchronous read.
+                always @(posedge clk) begin
+                    if (bank_we[i]) begin
+                        mem[bank_waddr[i*AWIDTH +: AWIDTH]] <= bank_din[i*DWIDTH +: DWIDTH];
+                    end
+                    dout_q <= mem[bank_raddr[i*AWIDTH +: AWIDTH]];
                 end
-            end
 
-            assign bank_dout[i*DWIDTH +: DWIDTH] = mem[bank_raddr[i*AWIDTH +: AWIDTH]];
+                assign bank_dout[i*DWIDTH +: DWIDTH] = dout_q;
+            end else begin : gen_comb_read
+                // Legacy mode: synchronous write and combinational read.
+                always @(posedge clk) begin
+                    if (bank_we[i]) begin
+                        mem[bank_waddr[i*AWIDTH +: AWIDTH]] <= bank_din[i*DWIDTH +: DWIDTH];
+                    end
+                end
+
+                assign bank_dout[i*DWIDTH +: DWIDTH] = mem[bank_raddr[i*AWIDTH +: AWIDTH]];
+            end
         end
     endgenerate
 endmodule

@@ -42,7 +42,8 @@ module ctrl_unit #(
     output reg                   pwm_en,           // PWM enable
     output wire [R-1:0]         bank_we,           // Write enable per bank
     output reg                   done,
-    output wire [2:0]            fsm_state          // Expose FSM state to top
+    output wire [2:0]            fsm_state,         // Expose FSM state to top
+    output wire                  output_prefetch    // Assert on last INTT issue before OUTPUT
 );
     // ---- State machine encoding -----------------------------------------------
     localparam IDLE   = 3'd0,
@@ -62,6 +63,12 @@ module ctrl_unit #(
 
     assign fsm_state = state;
 
+    wire intt_last_issue;
+    assign intt_last_issue = (state == INTT) && (stall_cnt == 0) && !is_Rhat_stage &&
+                             (stage_cnt == 0) && (b_cnt == b_limit) &&
+                             (g_cnt == (delta_idx - 1'b1));
+    assign output_prefetch = intt_last_issue;
+
     reg [2:0]           state;
     reg [2:0]           stage_cnt;    // Current stage (0 to STAGES-1)
     reg [LOGN-1:0]      g_cnt;        // Loop counter g (0 .. delta_idx-1)
@@ -80,10 +87,14 @@ module ctrl_unit #(
     integer r_idx, bit_idx;
     integer r1, r2;
     integer idx_base;
+    integer stride_all;
+    integer base_block;
     reg [LOGN-1:0] b_rev;
     integer rev_bits;
     always @(*) begin
         b_rev = 0;
+        orig_addrs = {R*LOGN{1'b0}};
+        tw_step = {$clog2(2*N){1'b0}};
 
         if (is_Rhat_stage && HAS_RHAT_STAGE) begin
             // Mixed-radix special stage addressing (Algorithm 4/5 special branch).
@@ -108,9 +119,13 @@ module ctrl_unit #(
                     b_rev[rev_bits - 1 - bit_idx] = b_cnt[bit_idx];
             end
 
+            // Algebraically equivalent rewrite with fewer multipliers on the
+            // critical control-to-address path.
+            stride_all = (delta_idx << LOGR);
+            base_block = b_cnt * stride_all;
             for (r_idx = 0; r_idx < R; r_idx = r_idx + 1) begin
                 orig_addrs[r_idx*LOGN +: LOGN] =
-                    b_cnt * (delta_idx << LOGR) + g_cnt + (delta_idx * r_idx);
+                    base_block + g_cnt + (delta_idx * r_idx);
             end
 
             tw_step = ((2 * b_rev + 1) * delta_idx) % (2 * N);
@@ -175,15 +190,13 @@ module ctrl_unit #(
                     if (stall_cnt != 0) begin
                         stall_cnt <= stall_cnt - 1'b1;
                     end else begin
-                        stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
-
                         if (is_Rhat_stage) begin
                             if (b_cnt + R_OVER_RHAT <= b_limit) begin
                                 b_cnt <= b_cnt + R_OVER_RHAT;
                             end else begin
                                 // Mixed-radix special stage done → NTT2
                                 is_Rhat_stage <= 0;
-                                stall_cnt <= 0;
+                                stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                                 state     <= NTT2;
                                 stage_cnt <= 0;
                                 g_cnt     <= 0;
@@ -207,6 +220,8 @@ module ctrl_unit #(
                                         stage_cnt <= stage_cnt + 1;
                                         delta_idx <= delta_idx >> LOGR;
                                         b_limit   <= (b_limit << LOGR) | {LOGR{1'b1}};
+                                        // Flush writeback pipeline between dependent stages.
+                                        stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                                     end else begin
                                         // Standard stages done.
                                         if (HAS_RHAT_STAGE && (RHAT != 1)) begin
@@ -216,6 +231,7 @@ module ctrl_unit #(
                                             b_cnt <= 0;
                                             b_limit <= R_POW_STAGES - 1;
                                             delta_idx <= 0;
+                                            stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                                         end else begin
                                             // NTT1 done → NTT2
                                             state     <= NTT2;
@@ -227,6 +243,7 @@ module ctrl_unit #(
                                             rd_sel    <= 2'b10;
                                             wr_sel    <= 2'b10;
                                             ntt_mode  <= 1;
+                                            stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                                         end
                                     end
                                 end
@@ -240,15 +257,13 @@ module ctrl_unit #(
                     if (stall_cnt != 0) begin
                         stall_cnt <= stall_cnt - 1'b1;
                     end else begin
-                        stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
-
                         if (is_Rhat_stage) begin
                             if (b_cnt + R_OVER_RHAT <= b_limit) begin
                                 b_cnt <= b_cnt + R_OVER_RHAT;
                             end else begin
                                 // Mixed-radix special stage done → PWM
                                 is_Rhat_stage <= 0;
-                                stall_cnt <= 0;
+                                stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                                 state     <= PWM;
                                 stage_cnt <= 0;
                                 g_cnt     <= 0;
@@ -274,6 +289,7 @@ module ctrl_unit #(
                                         stage_cnt <= stage_cnt + 1;
                                         delta_idx <= delta_idx >> LOGR;
                                         b_limit   <= (b_limit << LOGR) | {LOGR{1'b1}};
+                                        stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                                     end else begin
                                         if (HAS_RHAT_STAGE && (RHAT != 1)) begin
                                             is_Rhat_stage <= 1;
@@ -282,6 +298,7 @@ module ctrl_unit #(
                                             b_cnt <= 0;
                                             b_limit <= R_POW_STAGES - 1;
                                             delta_idx <= 0;
+                                            stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                                         end else begin
                                             // NTT2 done → PWM
                                             state     <= PWM;
@@ -295,6 +312,7 @@ module ctrl_unit #(
                                             wr_sel    <= 2'b01;
                                             pwm_en    <= 1;
                                             ntt_mode  <= 0;
+                                            stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                                         end
                                     end
                                 end
@@ -311,8 +329,6 @@ module ctrl_unit #(
                     if (stall_cnt != 0) begin
                         stall_cnt <= stall_cnt - 1'b1;
                     end else begin
-                        stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
-
                         if (g_cnt < delta_idx - 1) begin
                             g_cnt <= g_cnt + 1;
                         end else begin
@@ -331,13 +347,14 @@ module ctrl_unit #(
                                 stage_cnt <= STAGES;
                                 b_limit <= R_POW_STAGES - 1;
                                 delta_idx <= 0;
-                                stall_cnt <= 0;
+                                stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                             end else begin
                                 is_Rhat_stage <= 0;
                                 // Algorithm 5 high-radix stages: s from STAGES-1 down to 0.
                                 stage_cnt <= STAGES - 1;
                                 b_limit   <= INTT_B_INIT;
                                 delta_idx <= RHAT;
+                                stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                             end
                         end
                     end
@@ -351,8 +368,6 @@ module ctrl_unit #(
                     if (stall_cnt != 0) begin
                         stall_cnt <= stall_cnt - 1'b1;
                     end else begin
-                        stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
-
                         if (is_Rhat_stage) begin
                             if (b_cnt + R_OVER_RHAT <= b_limit) begin
                                 b_cnt <= b_cnt + R_OVER_RHAT;
@@ -364,7 +379,7 @@ module ctrl_unit #(
                                 b_cnt <= 0;
                                 b_limit <= INTT_B_INIT;
                                 delta_idx <= RHAT;
-                                stall_cnt <= 0;
+                                stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                             end
                         end else begin
                             if (g_cnt < delta_idx - 1) begin
@@ -379,13 +394,14 @@ module ctrl_unit #(
                                         stage_cnt <= stage_cnt - 1;
                                         delta_idx <= delta_idx << LOGR;
                                         b_limit   <= b_limit >> LOGR;
+                                        stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                                     end else begin
                                         // INTT done → go to OUTPUT
                                         state    <= OUTPUT;
                                         load_cnt <= 0;
                                         rd_sel   <= 2'b01;
                                         wr_sel   <= 2'b00;
-                                        stall_cnt <= 0;
+                                        stall_cnt <= (PIPE_LATENCY > 0) ? (PIPE_LATENCY - 1) : 0;
                                     end
                                 end
                             end
