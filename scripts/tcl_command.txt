@@ -1,0 +1,1 @@
+source "D:/Projects/Current projects/RE sem 6 (Mixed-Radix_NTT_Multiplication)/NTT Multiplication Algorithm/scripts/vivado_optimization.tcl"
