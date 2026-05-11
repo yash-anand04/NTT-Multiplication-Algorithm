@@ -28,3 +28,5 @@ sim/outputs*.txt
 # OS metadata
 Thumbs.db
 .DS_Store
+tight_setup_hold_pins.txt
+

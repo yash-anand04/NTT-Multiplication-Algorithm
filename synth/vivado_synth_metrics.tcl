@@ -137,9 +137,41 @@ proc extract_metric {text pattern} {
 }
 
 proc extract_slack {text} {
+    set lines [split $text "\n"]
+    set in_summary 0
 
-    if {[regexp {WNS\(ns\)\s+([-+]?[0-9]*\.?[0-9]+)} $text -> val]} {
-        return [string trim $val]
+    for {set i 0} {$i < [llength $lines]} {incr i} {
+        set line [lindex $lines $i]
+
+        if {[string match "*Design Timing Summary*" $line]} {
+            set in_summary 1
+            continue
+        }
+
+        if {!$in_summary} {
+            continue
+        }
+
+        if {[string match "*WNS(ns)*" $line]} {
+            for {set j [expr {$i + 1}]} {$j < [llength $lines]} {incr j} {
+                set row [string trim [lindex $lines $j]]
+
+                if {$row eq ""} {
+                    continue
+                }
+
+                if {[regexp {^([-+]?[0-9]*\.?[0-9]+)\s+[-+]?[0-9]*\.?[0-9]+} $row -> val]} {
+                    return [string trim $val]
+                }
+            }
+        }
+    }
+
+    for {set i 0} {$i < [llength $lines]} {incr i} {
+        set line [lindex $lines $i]
+        if {[regexp {Worst Slack\s+([-+]?[0-9]*\.?[0-9]+)} $line -> val]} {
+            return [string trim $val]
+        }
     }
 
     return "N/A"

@@ -1,7 +1,7 @@
 Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | Tool Version : Vivado v.2022.2 (win64) Build 3671981 Fri Oct 14 05:00:03 MDT 2022
-| Date         : Sun May 10 11:41:13 2026
+| Date         : Sun May 10 19:21:44 2026
 | Host         : LAPTOP-54I1J1D9 running 64-bit major release  (build 9200)
 | Command      : report_utilization -file {D:/Projects/Current projects/RE sem 6 (Mixed-Radix_NTT_Multiplication)/NTT Multiplication Algorithm/synth/results_r16_n256/01_synth_utilization.rpt}
 | Design       : ntt_top
@@ -31,8 +31,8 @@ Table of Contents
 +----------------------------+-------+-------+------------+-----------+-------+
 |          Site Type         |  Used | Fixed | Prohibited | Available | Util% |
 +----------------------------+-------+-------+------------+-----------+-------+
-| Slice LUTs*                | 16197 |     0 |          0 |    101400 | 15.97 |
-|   LUT as Logic             | 15813 |     0 |          0 |    101400 | 15.59 |
+| Slice LUTs*                | 19246 |     0 |          0 |    101400 | 18.98 |
+|   LUT as Logic             | 18862 |     0 |          0 |    101400 | 18.60 |
 |   LUT as Memory            |   384 |     0 |          0 |     35000 |  1.10 |
 |     LUT as Distributed RAM |   384 |     0 |            |           |       |
 |     LUT as Shift Register  |     0 |     0 |            |           |       |
@@ -84,8 +84,8 @@ Warning! LUT value is adjusted to account for LUT combining.
 +----------------+------+-------+------------+-----------+-------+
 |    Site Type   | Used | Fixed | Prohibited | Available | Util% |
 +----------------+------+-------+------------+-----------+-------+
-| DSPs           |   48 |     0 |          0 |       600 |  8.00 |
-|   DSP48E1 only |   48 |       |            |           |       |
+| DSPs           |   64 |     0 |          0 |       600 | 10.67 |
+|   DSP48E1 only |   64 |       |            |           |       |
 +----------------+------+-------+------------+-----------+-------+
 
 
@@ -156,18 +156,18 @@ Warning! LUT value is adjusted to account for LUT combining.
 +----------+------+---------------------+
 | Ref Name | Used | Functional Category |
 +----------+------+---------------------+
-| LUT6     | 7209 |                 LUT |
-| LUT4     | 2717 |                 LUT |
-| LUT2     | 2637 |                 LUT |
-| LUT5     | 2309 |                 LUT |
-| CARRY4   | 2028 |          CarryLogic |
-| LUT3     | 1357 |                 LUT |
-| LUT1     | 1067 |                 LUT |
+| LUT6     | 8664 |                 LUT |
+| LUT2     | 3931 |                 LUT |
+| LUT4     | 3469 |                 LUT |
+| CARRY4   | 2556 |          CarryLogic |
+| LUT5     | 2412 |                 LUT |
+| LUT3     | 1639 |                 LUT |
+| LUT1     | 1083 |                 LUT |
 | MUXF7    |  578 |               MuxFx |
 | RAMD32   |  576 |  Distributed Memory |
 | RAMS32   |  192 |  Distributed Memory |
 | FDCE     |   65 |        Flop & Latch |
-| DSP48E1  |   48 |    Block Arithmetic |
+| DSP48E1  |   64 |    Block Arithmetic |
 | IBUF     |   37 |                  IO |
 | OBUF     |   18 |                  IO |
 | MUXF8    |   17 |               MuxFx |

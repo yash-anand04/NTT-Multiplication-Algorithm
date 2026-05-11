@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(iverilog -g2009 -t null rtl/mvntt_subntt8.v rtl/mvntt_subntt32.v rtl/mvntt_trackb_top.v rtl/d1_arith.v rtl/twiddle_rom.v rtl/mod_mul_fermat.v rtl/r2ntt_r8.v rtl/r2intt_r8.v rtl/r2ntt_generic.v rtl/r2intt_generic.v)",
+      "Bash(iverilog -g2009 -t null rtl/r2_butterfly.v rtl/r2intt_butterfly_pow2.v rtl/d1_arith.v rtl/twiddle_rom.v rtl/mod_mul_fermat.v rtl/r2ntt_r8.v rtl/r2intt_r8.v rtl/r2ntt_generic.v rtl/r2intt_generic.v rtl/mvntt_subntt8.v rtl/mvntt_subntt32.v rtl/mvntt_trackb_top.v)"
+    ]
+  }
+}
