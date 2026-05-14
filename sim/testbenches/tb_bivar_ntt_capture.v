@@ -1,10 +1,17 @@
 `timescale 1ns/1ps
 
+`ifndef BIVAR_L
+  `define BIVAR_L 8
+`endif
+`ifndef BIVAR_M
+  `define BIVAR_M 32
+`endif
+
 module tb_bivar_ntt_capture;
     localparam B      = 16;
-    localparam N      = 256;
-    localparam L      = 8;
-    localparam M      = 32;
+    localparam L      = `BIVAR_L;
+    localparam M      = `BIVAR_M;
+    localparam N      = L * M;
     localparam WWIDTH = B + 1;
 
     reg clk, rst, start;
@@ -20,7 +27,7 @@ module tb_bivar_ntt_capture;
     integer i;
     integer out_idx;
 
-    bivar_ntt_top #(.B(B), .N(N), .L(L), .M(M)) dut (
+    bivar_ntt_top #(.B(B), .L(L), .M(M)) dut (
         .clk            (clk),
         .rst            (rst),
         .start          (start),
