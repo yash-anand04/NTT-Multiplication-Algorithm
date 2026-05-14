@@ -8,14 +8,15 @@
 //   Basis: {X1^i1 * X2^i2 | i1 in [0,L), i2 in [0,M)}  L*M = N
 //   Index: natural polynomial index i = i1*M + i2 (row-major)
 //
-// Parameters (fixed for N=256, q=65537):
-//   L = 8   (row/X1 dimension, shift-only 8-pt NTT via r2ntt_r8,  WEXP=12)
-//   M = 32  (col/X2 dimension, shift-only 32-pt NTT via r2ntt_r32, WEXP=19)
+// Parameters (q=65537, L=8 fixed by Fermat prime structure):
+//   L = 8   (row/X1 dimension, shift-only 8-pt NTT via r2ntt_r8,   WEXP=12)
+//   M = N/8 (col/X2 dimension, shift-only M-pt NTT; WEXP depends on N)
+//     N=64  → M=8,  col uses r2ntt_r8   WEXP=12
+//     N=128 → M=16, col uses r2ntt_r16  WEXP=6
+//     N=256 → M=32, col uses r2ntt_r32  WEXP=19 (default)
 //
-// Hardware savings vs. Track A/B:
-//   Row butterflies: shift-only (omega_L = 2^12, no multiplier)
-//   Col butterflies: shift-only (omega_M = 2^3 = 8, no multiplier)
-//   mod_mul_fermat only for: pre-twist, cross-twiddle, PWM, un-twist.
+// Hardware savings: row and col butterflies are shift-only (no DSP multiplier).
+// mod_mul_fermat only for: pre-twist, cross-twiddle, PWM, un-twist.
 //
 // Pipeline: LOAD -> FWD_ROW_A -> FWD_XTW_A -> FWD_COL_A ->
 //                   FWD_ROW_B -> FWD_XTW_B -> FWD_COL_B ->
@@ -26,11 +27,11 @@
 `define _BIVAR_NTT_TOP_GUARD
 
 module bivar_ntt_top #(
-    parameter B      = 16,
-    parameter N      = 256,
-    parameter L      = 8,
-    parameter M      = 32,
-    parameter WWIDTH = B + 1,
+    parameter B       = 16,
+    parameter L       = 8,
+    parameter M       = 32,
+    parameter N       = L * M,    // derived; override only if tools require it
+    parameter WWIDTH  = B + 1,
     parameter TW_BITS = $clog2(2*N)
 )(
     input  wire              clk,
@@ -88,12 +89,12 @@ module bivar_ntt_top #(
     reg  [L*WWIDTH-1:0] ntt8_in_pack;
     wire [L*WWIDTH-1:0] ntt8_out_pack;
 
-    // 32-pt col NTT I/O.
-    reg  [M*WWIDTH-1:0] ntt32_in_pack;
-    wire [M*WWIDTH-1:0] ntt32_out_pack;
+    // M-pt col NTT I/O.
+    reg  [M*WWIDTH-1:0] nttM_in_pack;
+    wire [M*WWIDTH-1:0] nttM_out_pack;
 
-    wire inverse_subntt8  = (state == ST_INV_ROW);
-    wire inverse_subntt32 = (state == ST_INV_COL);
+    wire inverse_subntt8 = (state == ST_INV_ROW);
+    wire inverse_subnttM = (state == ST_INV_COL);
 
     function [TW_BITS-1:0] inv_tw_idx;
         input [TW_BITS-1:0] idx;
@@ -143,11 +144,32 @@ module bivar_ntt_top #(
         .out_norm (ntt8_out_pack)
     );
 
-    bivar_ntt_subntt32 #(.B(B), .M(M), .WWIDTH(WWIDTH)) u_subntt32 (
-        .inverse  (inverse_subntt32),
-        .in_norm  (ntt32_in_pack),
-        .out_norm (ntt32_out_pack)
-    );
+    // Column NTT: select core based on M (determined by N=L*M with L=8 fixed).
+    // All three cases are shift-only for q=65537:
+    //   M=8:  omega_8  = psi_{64}^{16}  = 2^12 (reuses r2ntt_r8, WEXP=12)
+    //   M=16: omega_16 = psi_{128}^{16} = 2^6  (r2ntt_r16, WEXP=6)
+    //   M=32: omega_32 = psi_{256}^{16} = 2^19 (r2ntt_r32, WEXP=19)
+    generate
+        if (M == 8) begin : gen_col_ntt
+            bivar_ntt_subntt8 #(.B(B), .L(8), .WWIDTH(WWIDTH)) u_subnttM (
+                .inverse  (inverse_subnttM),
+                .in_norm  (nttM_in_pack),
+                .out_norm (nttM_out_pack)
+            );
+        end else if (M == 16) begin : gen_col_ntt
+            bivar_ntt_subntt16 #(.B(B), .M(16), .WWIDTH(WWIDTH)) u_subnttM (
+                .inverse  (inverse_subnttM),
+                .in_norm  (nttM_in_pack),
+                .out_norm (nttM_out_pack)
+            );
+        end else begin : gen_col_ntt
+            bivar_ntt_subntt32 #(.B(B), .M(M), .WWIDTH(WWIDTH)) u_subnttM (
+                .inverse  (inverse_subnttM),
+                .in_norm  (nttM_in_pack),
+                .out_norm (nttM_out_pack)
+            );
+        end
+    endgenerate
 
     integer ci;
 
@@ -171,18 +193,18 @@ module bivar_ntt_top #(
 
     // Combinational: 32-pt NTT input packing.
     always @(*) begin
-        ntt32_in_pack = {M*WWIDTH{1'b0}};
+        nttM_in_pack = {M*WWIDTH{1'b0}};
         for (ci = 0; ci < M; ci = ci + 1) begin
             case (state)
                 ST_FWD_COL_A,
                 ST_FWD_COL_B:
                     // Column NTT input: trans[j1*M + i2] for i2=0..M-1.
-                    ntt32_in_pack[ci*WWIDTH +: WWIDTH] = trans[op_count*M + ci];
+                    nttM_in_pack[ci*WWIDTH +: WWIDTH] = trans[op_count*M + ci];
                 ST_INV_COL:
                     // Inverse column NTT input: prod[j1*M + j2] for j2=0..M-1.
-                    ntt32_in_pack[ci*WWIDTH +: WWIDTH] = prod[op_count*M + ci];
+                    nttM_in_pack[ci*WWIDTH +: WWIDTH] = prod[op_count*M + ci];
                 default:
-                    ntt32_in_pack[ci*WWIDTH +: WWIDTH] = {WWIDTH{1'b0}};
+                    nttM_in_pack[ci*WWIDTH +: WWIDTH] = {WWIDTH{1'b0}};
             endcase
         end
     end
@@ -300,7 +322,7 @@ module bivar_ntt_top #(
                 // spec_a[j1*M + j2] = frequency-domain output.
                 ST_FWD_COL_A: begin
                     for (wi = 0; wi < M; wi = wi + 1)
-                        spec_a[op_count*M + wi] <= ntt32_out_pack[wi*WWIDTH +: WWIDTH];
+                        spec_a[op_count*M + wi] <= nttM_out_pack[wi*WWIDTH +: WWIDTH];
                     cycle_count <= cycle_count + 1'b1;
                     if (op_count == L-1) begin
                         op_count <= 8'd0;
@@ -333,7 +355,7 @@ module bivar_ntt_top #(
 
                 ST_FWD_COL_B: begin
                     for (wi = 0; wi < M; wi = wi + 1)
-                        spec_b[op_count*M + wi] <= ntt32_out_pack[wi*WWIDTH +: WWIDTH];
+                        spec_b[op_count*M + wi] <= nttM_out_pack[wi*WWIDTH +: WWIDTH];
                     cycle_count <= cycle_count + 1'b1;
                     if (op_count == L-1) begin
                         op_count <= 8'd0;
@@ -359,7 +381,7 @@ module bivar_ntt_top #(
                 // 32-pt INTT on prod[j1*M + j2]; work[j1*M + i2] = INTT output.
                 ST_INV_COL: begin
                     for (wi = 0; wi < M; wi = wi + 1)
-                        work[op_count*M + wi] <= ntt32_out_pack[wi*WWIDTH +: WWIDTH];
+                        work[op_count*M + wi] <= nttM_out_pack[wi*WWIDTH +: WWIDTH];
                     cycle_count <= cycle_count + 1'b1;
                     if (op_count == L-1) begin
                         op_count <= 8'd0;
