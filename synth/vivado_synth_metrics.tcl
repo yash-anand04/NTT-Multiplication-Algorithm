@@ -69,7 +69,8 @@ puts "INFO: Running synthesis..."
 set synth_opts [list \
     -top ntt_top \
     -part $device \
-    -flatten_hierarchy rebuilt \
+    -flatten_hierarchy full \
+    -retiming \
     -directive PerformanceOptimized \
     -generic "R=$radix" \
     -generic "N=$n_degree" \
@@ -102,6 +103,9 @@ opt_design -directive Explore
 place_design -directive Explore
 phys_opt_design -directive AggressiveExplore
 route_design -directive Explore
+# Extra physical optimization passes after routing to clean up remaining
+# negative slack (sometimes recovers a few hundred picoseconds).
+phys_opt_design -directive AggressiveExplore
 
 # Reports
 report_utilization \

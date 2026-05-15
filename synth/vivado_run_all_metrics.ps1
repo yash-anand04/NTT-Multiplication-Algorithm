@@ -53,12 +53,12 @@ if (-not $vivado_exe) {
 }
 
 # Configurations to run: (Radix, Degree)
-# NOTE: Default is N=256 (twiddle_factors.hex is generated for N=256).
-# Enable N=512/1024 only after regenerating twiddle ROM for those sizes.
+# Scope reduced to R=4 and R=8 (R=16 dropped from the paper).
+# R=8 N=256 is the primary point of comparison with the paper.
+# Ordered with the headline config first so its results appear earliest.
 $configs = @(
-    @{R=4; N=256},
     @{R=8; N=256},
-    @{R=16; N=256}
+    @{R=4; N=256}
 )
 
 Write-Host "=========================================================================" -ForegroundColor Cyan

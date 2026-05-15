@@ -3,13 +3,18 @@
 //
 // Full pipeline:  LOAD → NTT1 → NTT2 → PWM → INTT → OUTPUT
 //
-// Data-path:
-//   LOAD  : serial data_in_a / data_in_b -> banks (simple sequential address)
-//   NTT1  : lower half (poly a) through NTT butterfly
-//   NTT2  : upper half (poly b) through NTT butterfly
-//   PWM   : lower × upper -> lower half
-//   INTT  : lower half through INTT butterfly
-//   OUTPUT: sequential read of lower half -> data_out
+// Architecture matches the paper (Xing et al. 2025, IEEE Trans. Computers):
+//   - Single TIME-SHARED ModMul bank (R pipelined mod_mul_fermat instances)
+//     reused for NTT twiddle, INTT twiddle, and PWM phases.
+//   - 2-stage pipelined mod_mul_fermat (latency = 2 cycles, throughput = 1/cy)
+//   - Write-back control signals delayed 2 cycles to match ModMul latency.
+//
+// Data paths:
+//   NTT  :  Banks → modmul_ntt_in × twiddle → [ModMul] → R2NTT → Banks
+//   INTT :  Banks → R2INTT → [ModMul × twiddle] → Banks
+//   PWM  :  Banks → lower × upper → [ModMul] → Banks (lower half)
+//   LOAD :  serial data_in_a / data_in_b → banks
+//   OUTPUT: sequential read of lower half → data_out
 // =============================================================================
 
 `ifndef _NTT_TOP_GUARD
@@ -38,13 +43,11 @@ module ntt_top #(
     // CONTROL UNIT
     // =========================================================================
     wire [R*LOGN-1:0]  orig_addrs;
-    wire [$clog2(2*N)-1:0] tw_step;     // twiddle step = (2*bitrev(b)+1)*delta_idx
+    wire [$clog2(2*N)-1:0] tw_step;
     wire               is_Rhat_stage;
     wire [1:0]         rd_sel, wr_sel;
     wire               ntt_mode, pwm_en;
     wire [R-1:0]       ctrl_bank_we;
-
-    // Expose the FSM state so ntt_top can decode LOAD / OUTPUT
     wire [2:0]         fsm_state;
 
     ctrl_unit #(
@@ -106,22 +109,19 @@ module ntt_top #(
     // =========================================================================
     localparam TW_BITS = $clog2(2*N);
 
-    wire [R*WWIDTH-1:0]  tw_factors;  // R twiddle values: tw_factors[r] for element r
+    wire [R*WWIDTH-1:0]  tw_factors;
     wire [$clog2(2*N)-1:0] tw_step_inv = ((2 * N) - tw_step) % (2 * N);
     twiddle_rom #(.B(B), .N(N), .R(R)) u_twrom (
         .tw_step (tw_step),
         .tw_out  (tw_factors)
     );
 
-    // INTT needs inverse twiddles (omega^{-k})
     wire [R*WWIDTH-1:0] tw_factors_inv;
     twiddle_rom #(.B(B), .N(N), .R(R)) u_twrom_inv (
         .tw_step (tw_step_inv),
         .tw_out  (tw_factors_inv)
     );
 
-    // Mixed-radix special-stage twiddles for the R_OVER_RHAT=2 case.
-    // Lane k has r1=floor(k/2), r2=k%2 and uses omega^{r1*(2*bitrev(b+r2)+1)}.
     wire [LOGN-1:0] rhat_b = SUPPORTS_RHAT ? (orig_addrs[LOGN-1:0] / RHAT) : {LOGN{1'b0}};
     wire [TW_BITS-1:0] rhat_step0 = SUPPORTS_RHAT ?
         (((2 * bit_reverse(rhat_b, STAGES * LOGR)) + 1) % (2 * N)) : {TW_BITS{1'b0}};
@@ -160,8 +160,9 @@ module ntt_top #(
 
     wire [R*WWIDTH-1:0] tw_factors_ntt_sel;
     wire [R*WWIDTH-1:0] tw_factors_intt_sel;
-    assign tw_factors_ntt_sel  = (is_Rhat_stage && SUPPORTS_RHAT) ? tw_rhat_pack     : tw_factors;
-    assign tw_factors_intt_sel = (is_Rhat_stage && SUPPORTS_RHAT) ? tw_rhat_pack_inv : tw_factors_inv;
+    // is_Rhat_stage_d1 aligns with registered orig_addrs/tw_step (1 cycle late).
+    assign tw_factors_ntt_sel  = (is_Rhat_stage_d1 && SUPPORTS_RHAT) ? tw_rhat_pack     : tw_factors;
+    assign tw_factors_intt_sel = (is_Rhat_stage_d1 && SUPPORTS_RHAT) ? tw_rhat_pack_inv : tw_factors_inv;
 
     // =========================================================================
     // ADDRESS GENERATOR  (used during NTT / INTT / PWM)
@@ -177,11 +178,22 @@ module ntt_top #(
     );
 
     // =========================================================================
-    // LOAD / OUTPUT sequential address counter
-    // Each cycle during LOAD: address = load_cnt / R, bank = load_cnt % R
-    // Each cycle during OUTPUT: same pattern, read-only
+    // BANK WRITE ADDRESS for the current group
+    // (declared early so the delay pipeline below can register it).
     // =========================================================================
-    reg  [LOGN-1:0]  seq_cnt;   // counts 0..N-1 during LOAD and OUTPUT
+    wire [R*AWIDTH-1:0]  ntt_waddr;
+    interconnect_bank_addr #(.AWIDTH(AWIDTH), .R(R), .RHAT(RHAT)) u_icon_addr (
+        .raw_addrs      (bank_addrs_raw),
+        .iselect        (iselect),
+        // is_Rhat_stage_d1 aligns with registered orig_addrs (1 cycle late).
+        .is_Rhat_stage  (is_Rhat_stage_d1),
+        .selected_addrs (ntt_waddr)
+    );
+
+    // =========================================================================
+    // LOAD / OUTPUT sequential address counter
+    // =========================================================================
+    reg  [LOGN-1:0]  seq_cnt;
     always @(posedge clk or posedge rst) begin
         if (rst)
             seq_cnt <= 0;
@@ -191,8 +203,7 @@ module ntt_top #(
             seq_cnt <= 0;
     end
 
-    wire [AWIDTH-1:0] seq_addr = seq_cnt[LOGN-1:LOGR];   // upper bits = row
-    // Bank mapping must match addr_gen's conflict-free layout (sum of LOGR-bit groups mod R).
+    wire [AWIDTH-1:0] seq_addr = seq_cnt[LOGN-1:LOGR];
     localparam integer FULL_GROUPS = LOGN / LOGR;
     localparam integer REM_BITS    = LOGN - (FULL_GROUPS * LOGR);
     reg  [LOGR-1:0]   seq_bank;
@@ -232,13 +243,14 @@ module ntt_top #(
     );
 
     // =========================================================================
-    // INTERCONNECT: BankOut → Operands  (NTT/INTT/PWM)
+    // INTERCONNECT: BankOut → Operands  (current cycle's read mapping)
     // =========================================================================
     wire [R*DWIDTH-1:0]  operands_out;
     interconnect_bank_out #(.DWIDTH(DWIDTH), .R(R), .RHAT(RHAT)) u_icon_out (
         .bank_data_out (bank_dout),
         .iselect       (iselect),
-        .is_Rhat_stage (is_Rhat_stage),
+        // is_Rhat_stage_d1 aligns with registered orig_addrs (1 cycle late).
+        .is_Rhat_stage (is_Rhat_stage_d1),
         .operands_out  (operands_out)
     );
 
@@ -255,81 +267,8 @@ module ntt_top #(
     endgenerate
 
     // =========================================================================
-    // NTT PATH:  Norm → ModMul (twiddle) → Norm→D1 → R2NTT → D1→Norm
-    // rd_sel selects which polynomial half is read by NTT:
-    //   2'b01 -> lower (NTT1), 2'b10 -> upper (NTT2)
-    // =========================================================================
-    wire [R*WWIDTH-1:0]  modmul_ntt_in = (rd_sel == 2'b10) ? op_upper : op_lower;
-
-    wire [R*WWIDTH-1:0]  mm_ntt_out;
-    generate
-        for (gi = 0; gi < R; gi = gi + 1) begin : gen_modmul_ntt
-            mod_mul_fermat #(B) u_mm (
-                .clk    (clk),
-                .rst    (rst),
-                .a      (modmul_ntt_in[gi*WWIDTH +: WWIDTH]),
-                .b      (tw_factors_ntt_sel[gi*WWIDTH +: WWIDTH]),
-                .result (mm_ntt_out[gi*WWIDTH +: WWIDTH])
-            );
-        end
-    endgenerate
-
-    wire [R*WWIDTH-1:0]  ntt_d1_in;
-    generate
-        for (gi = 0; gi < R; gi = gi + 1) begin : gen_ntod1
-            wire [WWIDTH-1:0] nd;
-            norm_to_d1 #(B) u_nd1 (.in(mm_ntt_out[gi*WWIDTH +: WWIDTH]), .out(nd));
-            assign ntt_d1_in[gi*WWIDTH +: WWIDTH] = nd;
-        end
-    endgenerate
-
-    wire [R*WWIDTH-1:0] ntt_result_d1;
-    wire [R*WWIDTH-1:0] ntt_result;
-    generate
-        if (R == 4) begin : gen_r2ntt_r4
-            wire [WWIDTH-1:0] r2ntt_out0, r2ntt_out1, r2ntt_out2, r2ntt_out3;
-            r2ntt_r4 #(.B(B), .KSHIFT(8), .KNEG(1)) u_r2ntt (
-                .a0 (ntt_d1_in[0*WWIDTH +: WWIDTH]),
-                .a1 (ntt_d1_in[1*WWIDTH +: WWIDTH]),
-                .a2 (ntt_d1_in[2*WWIDTH +: WWIDTH]),
-                .a3 (ntt_d1_in[3*WWIDTH +: WWIDTH]),
-                .is_Rhat_stage (is_Rhat_stage),
-                .A0 (r2ntt_out0), .A1(r2ntt_out1), .A2(r2ntt_out2), .A3(r2ntt_out3)
-            );
-            assign ntt_result_d1 = {r2ntt_out3, r2ntt_out2, r2ntt_out1, r2ntt_out0};
-        end else if (R == 8) begin : gen_r2ntt_r8
-            r2ntt_r8 #(.B(B), .N(N)) u_r2ntt8 (
-                .in_d1        (ntt_d1_in),
-                .is_Rhat_stage(is_Rhat_stage),
-                .out_d1       (ntt_result_d1)
-            );
-        end else if (R == 16) begin : gen_r2ntt_r16
-            r2ntt_r16 #(.B(B)) u_r2ntt16 (
-                .in_d1        (ntt_d1_in),
-                .is_Rhat_stage(is_Rhat_stage),
-                .out_d1       (ntt_result_d1)
-            );
-        end else begin : gen_r2ntt_generic
-            r2ntt_generic #(.B(B), .N(N), .R(R)) u_r2ntt_g (
-                .in_d1        (ntt_d1_in),
-                .is_Rhat_stage(is_Rhat_stage),
-                .out_d1       (ntt_result_d1)
-            );
-        end
-    endgenerate
-
-    // Convert NTT outputs back to normal representation before write-back.
-    generate
-        for (gi = 0; gi < R; gi = gi + 1) begin : gen_ntt_d1n
-            d1_to_norm #(B) u_ntt_d1n (
-                .in  (ntt_result_d1[gi*WWIDTH +: WWIDTH]),
-                .out (ntt_result[gi*WWIDTH +: WWIDTH])
-            );
-        end
-    endgenerate
-
-    // =========================================================================
-    // INTT PATH:  R2INTT → D1→Norm → ModMul (twiddle)
+    // INTT BUTTERFLY PATH (runs BEFORE the shared ModMul, combinational)
+    // Paper Fig. 6 INTT path: Banks → Norm→D1 → R2INTT → D1→Norm → ModMul → Banks
     // =========================================================================
     wire [R*WWIDTH-1:0] intt_d1_in;
     generate
@@ -350,26 +289,26 @@ module ntt_top #(
                 .A1 (intt_d1_in[1*WWIDTH +: WWIDTH]),
                 .A2 (intt_d1_in[2*WWIDTH +: WWIDTH]),
                 .A3 (intt_d1_in[3*WWIDTH +: WWIDTH]),
-                .is_Rhat_stage (is_Rhat_stage),
+                .is_Rhat_stage (is_Rhat_stage_d1),
                 .a0 (r2intt_out0), .a1(r2intt_out1), .a2(r2intt_out2), .a3(r2intt_out3)
             );
             assign intt_d1_out = {r2intt_out3, r2intt_out2, r2intt_out1, r2intt_out0};
         end else if (R == 8) begin : gen_r2intt_r8
             r2intt_r8 #(.B(B), .N(N)) u_r2intt8 (
                 .in_d1        (intt_d1_in),
-                .is_Rhat_stage(is_Rhat_stage),
+                .is_Rhat_stage(is_Rhat_stage_d1),
                 .out_d1       (intt_d1_out)
             );
         end else if (R == 16) begin : gen_r2intt_r16
             r2intt_r16 #(.B(B)) u_r2intt16 (
                 .in_d1        (intt_d1_in),
-                .is_Rhat_stage(is_Rhat_stage),
+                .is_Rhat_stage(is_Rhat_stage_d1),
                 .out_d1       (intt_d1_out)
             );
         end else begin : gen_r2intt_generic
             r2intt_generic #(.B(B), .N(N), .R(R)) u_r2intt_g (
                 .in_d1        (intt_d1_in),
-                .is_Rhat_stage(is_Rhat_stage),
+                .is_Rhat_stage(is_Rhat_stage_d1),
                 .out_d1       (intt_d1_out)
             );
         end
@@ -384,83 +323,182 @@ module ntt_top #(
         end
     endgenerate
 
-    wire [R*WWIDTH-1:0] mm_intt_out;
+    // =========================================================================
+    // SHARED MODMUL BANK — time-shared for NTT, INTT, and PWM phases.
+    // R pipelined mod_mul_fermat instances (2-stage), 1 DSP each = R DSPs total.
+    //   NTT  : modmul_ntt_in  × tw_factors_ntt_sel
+    //   INTT : intt_norm      × tw_factors_intt_sel
+    //   PWM  : op_lower       × op_upper
+    // =========================================================================
+    // _d1 versions align with operands_out (now reflecting the group whose
+    // orig_addrs was computed 1 cycle ago in ctrl_unit).
+    wire [R*WWIDTH-1:0] modmul_ntt_in = (rd_sel_d1 == 2'b10) ? op_upper : op_lower;
+
+    wire [R*WWIDTH-1:0] mm_in_a = pwm_en_d1   ? op_lower      :
+                                   ntt_mode_d1 ? modmul_ntt_in :
+                                                 intt_norm;
+    wire [R*WWIDTH-1:0] mm_in_b = pwm_en_d1   ? op_upper            :
+                                   ntt_mode_d1 ? tw_factors_ntt_sel  :
+                                                 tw_factors_intt_sel;
+
+    wire [R*WWIDTH-1:0] mm_out;
     generate
-        for (gi = 0; gi < R; gi = gi + 1) begin : gen_modmul_intt
-            mod_mul_fermat #(B) u_mm_intt (
+        for (gi = 0; gi < R; gi = gi + 1) begin : gen_modmul_shared
+            mod_mul_fermat #(B) u_mm (
                 .clk    (clk),
                 .rst    (rst),
-                .a      (intt_norm[gi*WWIDTH +: WWIDTH]),
-                .b      (tw_factors_intt_sel[gi*WWIDTH +: WWIDTH]),
-                .result (mm_intt_out[gi*WWIDTH +: WWIDTH])
+                .a      (mm_in_a[gi*WWIDTH +: WWIDTH]),
+                .b      (mm_in_b[gi*WWIDTH +: WWIDTH]),
+                .result (mm_out[gi*WWIDTH +: WWIDTH])
             );
         end
     endgenerate
 
     // =========================================================================
-    // PWM PATH:  lower × upper → lower (normal representation)
+    // 3-CYCLE WRITE-BACK DELAY PIPELINE
+    // mod_mul_fermat is now 3-stage pipelined (input reg + multiply reg +
+    // reduce reg) so write-back control signals are delayed 3 cycles.
+    // For R=4 (N=256, 64 groups/stage) and R=8 (N=256, 32 groups/stage +
+    // Rhat), one stall cycle between consecutive groups (PIPE_LATENCY=2 in
+    // ctrl_unit) is enough to keep the in-bank write/read addresses disjoint.
     // =========================================================================
-    wire [R*WWIDTH-1:0] pwm_out;
+    // With registered orig_addrs in ctrl_unit, the data flow is 1 cycle late
+    // relative to ctrl signals.  Input mux at cycle T+1 uses *_d1 versions of
+    // ctrl signals (rd_sel, pwm_en, ntt_mode, is_Rhat_stage) to align with the
+    // delayed orig_addrs/iselect/ntt_waddr.  Write-back at cycle T+4 uses *_d4
+    // for raw ctrl signals (and *_d3 for the orig_addrs-derived waddr/iselect).
+    reg [1:0]          rd_sel_d1;
+    reg                pwm_en_d1;
+    reg [1:0]          wr_sel_d1,        wr_sel_d2,        wr_sel_d3,        wr_sel_d4;
+    reg                ntt_mode_d1,      ntt_mode_d2,      ntt_mode_d3,      ntt_mode_d4;
+    reg [R-1:0]        bank_we_d1,       bank_we_d2,       bank_we_d3,       bank_we_d4;
+    reg [R*AWIDTH-1:0] ntt_waddr_d1,     ntt_waddr_d2,     ntt_waddr_d3;
+    reg [LOGR-1:0]     iselect_d1,       iselect_d2,       iselect_d3;
+    reg                is_Rhat_stage_d1, is_Rhat_stage_d2, is_Rhat_stage_d3, is_Rhat_stage_d4;
+    reg [R*DWIDTH-1:0] operands_out_d1,  operands_out_d2,  operands_out_d3;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rd_sel_d1        <= 2'b0;
+            pwm_en_d1        <= 1'b0;
+            wr_sel_d1        <= 2'b0;          wr_sel_d2        <= 2'b0;          wr_sel_d3        <= 2'b0;          wr_sel_d4        <= 2'b0;
+            ntt_mode_d1      <= 1'b0;          ntt_mode_d2      <= 1'b0;          ntt_mode_d3      <= 1'b0;          ntt_mode_d4      <= 1'b0;
+            bank_we_d1       <= {R{1'b0}};     bank_we_d2       <= {R{1'b0}};     bank_we_d3       <= {R{1'b0}};     bank_we_d4       <= {R{1'b0}};
+            ntt_waddr_d1     <= {R*AWIDTH{1'b0}}; ntt_waddr_d2  <= {R*AWIDTH{1'b0}}; ntt_waddr_d3  <= {R*AWIDTH{1'b0}};
+            iselect_d1       <= {LOGR{1'b0}};  iselect_d2       <= {LOGR{1'b0}};  iselect_d3       <= {LOGR{1'b0}};
+            is_Rhat_stage_d1 <= 1'b0;          is_Rhat_stage_d2 <= 1'b0;          is_Rhat_stage_d3 <= 1'b0;          is_Rhat_stage_d4 <= 1'b0;
+            operands_out_d1  <= {R*DWIDTH{1'b0}}; operands_out_d2 <= {R*DWIDTH{1'b0}}; operands_out_d3 <= {R*DWIDTH{1'b0}};
+        end else begin
+            rd_sel_d1        <= rd_sel;
+            pwm_en_d1        <= pwm_en;
+            wr_sel_d1        <= wr_sel;        wr_sel_d2        <= wr_sel_d1;     wr_sel_d3        <= wr_sel_d2;     wr_sel_d4        <= wr_sel_d3;
+            ntt_mode_d1      <= ntt_mode;      ntt_mode_d2      <= ntt_mode_d1;   ntt_mode_d3      <= ntt_mode_d2;   ntt_mode_d4      <= ntt_mode_d3;
+            bank_we_d1       <= ctrl_bank_we;  bank_we_d2       <= bank_we_d1;    bank_we_d3       <= bank_we_d2;    bank_we_d4       <= bank_we_d3;
+            ntt_waddr_d1     <= ntt_waddr;     ntt_waddr_d2     <= ntt_waddr_d1;  ntt_waddr_d3     <= ntt_waddr_d2;
+            iselect_d1       <= iselect;       iselect_d2       <= iselect_d1;    iselect_d3       <= iselect_d2;
+            is_Rhat_stage_d1 <= is_Rhat_stage; is_Rhat_stage_d2 <= is_Rhat_stage_d1; is_Rhat_stage_d3 <= is_Rhat_stage_d2; is_Rhat_stage_d4 <= is_Rhat_stage_d3;
+            operands_out_d1  <= operands_out;  operands_out_d2  <= operands_out_d1; operands_out_d3 <= operands_out_d2;
+        end
+    end
+
+    // =========================================================================
+    // NTT BUTTERFLY PATH (after the shared ModMul, on 2-cycle delayed mm_out)
+    // Paper Fig. 6 NTT path: Banks → ModMul → Norm→D1 → R2NTT → D1→Norm → Banks
+    // is_Rhat_stage_d3 aligns butterfly mode with the correct group's mm_out.
+    // =========================================================================
+    wire [R*WWIDTH-1:0] ntt_d1_in;
     generate
-        for (gi = 0; gi < R; gi = gi + 1) begin : gen_pwm_mul
-            mod_mul_fermat #(B) u_mm_pwm (
-                .clk    (clk),
-                .rst    (rst),
-                .a      (op_lower[gi*WWIDTH +: WWIDTH]),
-                .b      (op_upper[gi*WWIDTH +: WWIDTH]),
-                .result (pwm_out[gi*WWIDTH +: WWIDTH])
+        for (gi = 0; gi < R; gi = gi + 1) begin : gen_ntod1
+            wire [WWIDTH-1:0] nd;
+            norm_to_d1 #(B) u_nd1 (.in(mm_out[gi*WWIDTH +: WWIDTH]), .out(nd));
+            assign ntt_d1_in[gi*WWIDTH +: WWIDTH] = nd;
+        end
+    endgenerate
+
+    // R2NTT operates on mm_out, which is the ModMul output for FSM cycle T's
+    // group (4 cycles ago). is_Rhat_stage_d4 aligns the butterfly mode.
+    wire [R*WWIDTH-1:0] ntt_result_d1;
+    wire [R*WWIDTH-1:0] ntt_result;
+    generate
+        if (R == 4) begin : gen_r2ntt_r4
+            wire [WWIDTH-1:0] r2ntt_out0, r2ntt_out1, r2ntt_out2, r2ntt_out3;
+            r2ntt_r4 #(.B(B), .KSHIFT(8), .KNEG(1)) u_r2ntt (
+                .a0 (ntt_d1_in[0*WWIDTH +: WWIDTH]),
+                .a1 (ntt_d1_in[1*WWIDTH +: WWIDTH]),
+                .a2 (ntt_d1_in[2*WWIDTH +: WWIDTH]),
+                .a3 (ntt_d1_in[3*WWIDTH +: WWIDTH]),
+                .is_Rhat_stage (is_Rhat_stage_d4),
+                .A0 (r2ntt_out0), .A1(r2ntt_out1), .A2(r2ntt_out2), .A3(r2ntt_out3)
+            );
+            assign ntt_result_d1 = {r2ntt_out3, r2ntt_out2, r2ntt_out1, r2ntt_out0};
+        end else if (R == 8) begin : gen_r2ntt_r8
+            r2ntt_r8 #(.B(B), .N(N)) u_r2ntt8 (
+                .in_d1        (ntt_d1_in),
+                .is_Rhat_stage(is_Rhat_stage_d4),
+                .out_d1       (ntt_result_d1)
+            );
+        end else if (R == 16) begin : gen_r2ntt_r16
+            r2ntt_r16 #(.B(B)) u_r2ntt16 (
+                .in_d1        (ntt_d1_in),
+                .is_Rhat_stage(is_Rhat_stage_d4),
+                .out_d1       (ntt_result_d1)
+            );
+        end else begin : gen_r2ntt_generic
+            r2ntt_generic #(.B(B), .N(N), .R(R)) u_r2ntt_g (
+                .in_d1        (ntt_d1_in),
+                .is_Rhat_stage(is_Rhat_stage_d4),
+                .out_d1       (ntt_result_d1)
+            );
+        end
+    endgenerate
+
+    generate
+        for (gi = 0; gi < R; gi = gi + 1) begin : gen_ntt_d1n
+            d1_to_norm #(B) u_ntt_d1n (
+                .in  (ntt_result_d1[gi*WWIDTH +: WWIDTH]),
+                .out (ntt_result[gi*WWIDTH +: WWIDTH])
             );
         end
     endgenerate
 
     // =========================================================================
-    // WRITE-DATA MUX
-    //   LOAD   : pack data_in_a (lower) + data_in_b (upper) into one word
-    //   NTT1   : NTT butterfly result → lower half
-    //   NTT2   : NTT butterfly result → upper half
-    //   INTT   : INTT+ModMul result   → lower half
-    //   PWM    : PWM result            → lower half
+    // WRITE-DATA MUX (all control signals are 2-cycle delayed)
+    //   NTT (ntt_mode_d3=1) : ntt_result (post-butterfly)
+    //   INTT / PWM           : mm_out directly (no further butterfly)
     // =========================================================================
     wire [DWIDTH-1:0]    load_word = {data_in_b, data_in_a};
 
-    // Butterfly result selection (shared across R elements)
-    // NOTE: pwm_out and mm_intt_out are pipelined by 2 cycles (mod_mul_fermat);
-    //       ntt_result is combinational (r2ntt adds only shift+add, no registers).
-    //       For NTT stages: result is available immediately, no latency.
-    //       For INTT and PWM: ModMul adds 2-cycle latency — controlled by stalls
-    //       in ctrl_unit via PIPE_LATENCY. Since ctrl_unit doesn't currently stall,
-    //       we use the combinational NTT result for NTT1/NTT2.
-    wire [R*WWIDTH-1:0]  bfly_result = pwm_en    ? pwm_out :
-                                        ntt_mode  ? ntt_result :
-                                                    mm_intt_out;
+    // ntt_mode_d4/wr_sel_d4 align with FSM cycle T's group (4 cycles in pipeline:
+    // 1 for registered orig_addrs + 3 for mod_mul_fermat).  operands_out_d3
+    // captures the bank read at cycle T+1 (1 cycle after FSM issue) and
+    // delivers it 3 cycles later at T+4 for write-back data preservation.
+    wire [R*WWIDTH-1:0]  bfly_result = ntt_mode_d4 ? ntt_result : mm_out;
 
-    // Pack butterfly results into DWIDTH words (preserve the appropriate half)
-    wire [R*DWIDTH-1:0]  bfly_data_pre;   // before bank-in interconnect routing
+    wire [R*DWIDTH-1:0]  bfly_data_pre;
     generate
         for (gi = 0; gi < R; gi = gi + 1) begin : gen_bfly_pack
-            wire [WWIDTH-1:0] rw = bfly_result[gi*WWIDTH +: WWIDTH];
-            wire [WWIDTH-1:0] cur_l = op_lower[gi*WWIDTH +: WWIDTH];
-            wire [WWIDTH-1:0] cur_u = op_upper[gi*WWIDTH +: WWIDTH];
-            // Preserve the non-target half to avoid corrupting the other polynomial.
+            wire [WWIDTH-1:0] rw    = bfly_result[gi*WWIDTH +: WWIDTH];
+            wire [WWIDTH-1:0] cur_l = operands_out_d3[gi*DWIDTH +:         WWIDTH];
+            wire [WWIDTH-1:0] cur_u = operands_out_d3[gi*DWIDTH + WWIDTH +: WWIDTH];
             assign bfly_data_pre[gi*DWIDTH +: DWIDTH] =
-                (wr_sel == 2'b10) ? {rw,    cur_l} :   // update upper only
-                (wr_sel == 2'b01) ? {cur_u, rw   } :   // update lower only
-                                    operands_out[gi*DWIDTH +: DWIDTH];
+                (wr_sel_d4 == 2'b10) ? {rw,    cur_l} :   // update upper only
+                (wr_sel_d4 == 2'b01) ? {cur_u, rw   } :   // update lower only
+                                        operands_out_d3[gi*DWIDTH +: DWIDTH];
         end
     endgenerate
 
     // =========================================================================
-    // INTERCONNECT: Operands → Banks  (NTT/INTT/PWM write-back)
-    // BUG FIX: butterfly results must be inverse-circularly-shifted before
-    // writing back, so operand[k] lands in bank[(iselect+k)%R].
+    // INTERCONNECT: Operands → Banks  (pipelined write-back, uses delayed iselect)
     // =========================================================================
     wire [R*DWIDTH-1:0]  bfly_data_routed;
 
-    // With combinational ModMul, iselect is valid for the same cycle's results.
     interconnect_bank_in #(.DWIDTH(DWIDTH), .R(R), .RHAT(RHAT)) u_icon_in (
         .operands_in  (bfly_data_pre),
-        .iselect      (iselect),
-        .is_Rhat_stage(is_Rhat_stage),
+        // iselect_d3 captures iselect at T+1 (derived from registered orig_addrs)
+        // and propagates 3 cycles to T+4.  is_Rhat_stage_d4 aligns with raw ctrl
+        // (which is not on the registered-orig_addrs side).
+        .iselect      (iselect_d3),
+        .is_Rhat_stage(is_Rhat_stage_d4),
         .bank_data_in (bfly_data_routed)
     );
 
@@ -473,21 +511,11 @@ module ntt_top #(
         end
     endgenerate
 
-    // Final bank_din mux
     assign bank_din = is_load ? load_data : bfly_data_routed;
 
     // =========================================================================
-    // BANK WRITE ADDRESS  (combinational path: no pipeline delay)
+    // BANK WRITE ADDRESS  (delayed 2 cycles for pipelined write-back)
     // =========================================================================
-    wire [R*AWIDTH-1:0]  ntt_waddr;
-    interconnect_bank_addr #(.AWIDTH(AWIDTH), .R(R), .RHAT(RHAT)) u_icon_addr (
-        .raw_addrs      (bank_addrs_raw),
-        .iselect        (iselect),
-        .is_Rhat_stage  (is_Rhat_stage),
-        .selected_addrs (ntt_waddr)
-    );
-
-    // During LOAD, all banks get seq_addr (only one is enabled via bank_we)
     wire [R*AWIDTH-1:0]  load_waddr;
     generate
         for (gi = 0; gi < R; gi = gi + 1) begin : gen_load_waddr
@@ -495,10 +523,10 @@ module ntt_top #(
         end
     endgenerate
 
-    assign bank_waddr = is_load ? load_waddr : ntt_waddr;
+    assign bank_waddr = is_load ? load_waddr : ntt_waddr_d3;
 
     // =========================================================================
-    // BANK WRITE ENABLE  (direct from ctrl_unit each cycle)
+    // BANK WRITE ENABLE  (delayed 2 cycles)
     // =========================================================================
     wire [R-1:0] load_we;
     generate
@@ -507,12 +535,10 @@ module ntt_top #(
         end
     endgenerate
 
-    assign bank_we = is_load ? load_we : ctrl_bank_we;
+    assign bank_we = is_load ? load_we : bank_we_d4;
 
     // =========================================================================
-    // BANK READ ADDRESS
-    //   NTT/INTT/PWM : from mapped addresses (Algorithm 7, InterconnectBankAddr)
-    //   OUTPUT        : sequential scan, overriding bank_raddr
+    // BANK READ ADDRESS  (current cycle — reads ahead of pipelined write-back)
     // =========================================================================
     wire [R*AWIDTH-1:0]  out_raddr;
     generate
