@@ -27,8 +27,8 @@ SYNTH_DIR  = REPO_ROOT / "synth"
 # (PIPE_LATENCY=2 inserts 1 stall cycle between consecutive groups).
 # Scope reduced to R=4 and R=8 (R=16 dropped from the paper).
 SIM_CYCLES_NTT = {
-    (4,  64):  2177, (4,  128): 2177, (4,  256): 2177,
-    (8,  64):  1149, (8,  128): 1149, (8,  256): 1149,
+    (4,  64):   449, (4,  128): 1085, (4,  256): 2177,
+    (8,  64):   241, (8,  128):  573, (8,  256): 1149,
 }
 
 # bivar cycles from regression (formula: 2N + 7M + 3L, L=8 fixed)
@@ -41,6 +41,16 @@ SIM_CYCLES_BIVAR = {64: 208, 128: 392, 256: 760}
 # bivar: 8 DSPs (8 lanes x 1 mod_mul_fermat each, time-shared).
 PRED_DSP_NTT8  = 8
 PRED_DSP_BIVAR = 8
+
+# Synthesis-confirmed metrics (Kintex-7 -2, with Phase 4 architecture).
+# Both bivar variants pass full regression for all listed N.
+BIVAR_SYNTH = {
+    # N -> (variant, LUT, DSP, FF, BRAM)
+    "orig_64":   ("orig",   19341, 8,  8790, 0),
+    "opt_64":    ("opt",    13423, 8,  8825, 0),
+    "opt_128":   ("opt",    72308, 8, 17493, 0),
+    # opt_256 won't fit on xc7k160t (would need ~150K LUTs)
+}
 
 # Paper reference values from Xing et al. (2025), Table IV
 # Device: Virtex-7 xc7vx690tffg1761-3 (note: different part from our xc7k160tfbg484-2)
@@ -243,6 +253,20 @@ def main() -> int:
     print("   - Full multiplication count: O(N) = 7N  vs O(N log N) for monolithic NTT")
     print("   - Same architectural DSP count as ntt_top (~8 DSPs, time-shared)")
     print("   - To close cycle count gap: memory cohabitation (overlap LOAD with NTT1)")
+    print()
+    print("  BIVAR_OPT SYNTHESIS RESULTS (Kintex-7 -2, synth-only):")
+    print("   - Original bivar N=64:  LUT=19,341  DSP=8")
+    print("   - bivar_opt      N=64:  LUT=13,423  DSP=8   (-30% LUT vs original)")
+    print("   - bivar_opt      N=128: LUT=72,308  DSP=8   (B=16 muxes blow up area)")
+    print("   - bivar_opt      N=256: would not fit on xc7k160t (>101K LUT)")
+    print()
+    print("  HONEST FINDING ABOUT BIVAR ON FPGA:")
+    print("   The bivariate algorithm reduces multiplication count to O(N) -- great")
+    print("   for ASIC.  But the time-shared FSM needs banked storage with B-to-1")
+    print("   multiplexers (B=max(L,M)) for parallel access.  As N grows, M grows")
+    print("   linearly, so the M*M-to-M COL mux complexity grows quadratically.")
+    print("   DSP=8 is preserved at all N (paper claim verified), but LUT cost")
+    print("   grows fast.  On FPGA, bivar TRADES DSP for LUT, not just MUL count.")
     print()
     print("  Run synthesis:")
     print("    .\\synth\\vivado_run_all_metrics.ps1 -VivadoPath 'D:\\Xilinx\\Vivado\\2022.2\\bin\\vivado.bat'")

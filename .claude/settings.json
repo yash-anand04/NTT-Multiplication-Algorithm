@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python run_bivar_regression.py --n-degree 64 --skip-model-tier --random-count 10)"
-    ]
-  }
-}

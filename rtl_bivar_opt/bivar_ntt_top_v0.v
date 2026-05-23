@@ -23,10 +23,15 @@
 //                   PWM -> INV_COL -> INV_XTW -> INV_ROW -> OUTPUT
 // =============================================================================
 
-`ifndef _BIVAR_NTT_TOP_GUARD
-`define _BIVAR_NTT_TOP_GUARD
+`ifndef _BIVAR_NTT_TOP_V0_GUARD
+`define _BIVAR_NTT_TOP_V0_GUARD
 
-module bivar_ntt_top #(
+// v0: Original bivar_ntt_top + ram_style="distributed" on working arrays.
+// Quick experiment to see whether Vivado's LUTRAM inference alone reduces
+// the 19K-LUT register-array cost.  If LUT count drops significantly we're
+// done; if not, the full restructuring (bivar_opt_top with banked memory)
+// is needed.
+module bivar_ntt_top_v0 #(
     parameter B       = 16,
     parameter L       = 8,
     parameter M       = 32,
@@ -64,19 +69,22 @@ module bivar_ntt_top #(
     reg [7:0] op_count;
 
     // Memory arrays: all N=256 entries.
-    // Addressing: raw_a[i1*M + i2] = a[i1*M + i2] (row-major index).
-    reg [WWIDTH-1:0] raw_a  [0:N-1];
-    reg [WWIDTH-1:0] raw_b  [0:N-1];
+    // v0 optimization: ram_style="distributed" hints request LUTRAM inference.
+    // For multi-lane parallel reads (op_count*L+ci etc.), Vivado typically
+    // replicates the LUTRAM per read port, which is still cheaper than the
+    // wide muxes Vivado synthesises without the hint.
+    (* ram_style = "distributed" *) reg [WWIDTH-1:0] raw_a  [0:N-1];
+    (* ram_style = "distributed" *) reg [WWIDTH-1:0] raw_b  [0:N-1];
     // work[i2*L + j1]: post-row-NTT data, indexed by (i2, j1).
-    reg [WWIDTH-1:0] work   [0:N-1];
+    (* ram_style = "distributed" *) reg [WWIDTH-1:0] work   [0:N-1];
     // trans[j1*M + i2]: post-cross-twiddle, indexed by (j1, i2).
-    reg [WWIDTH-1:0] trans  [0:N-1];
-    reg [WWIDTH-1:0] spec_a [0:N-1];
-    reg [WWIDTH-1:0] spec_b [0:N-1];
+    (* ram_style = "distributed" *) reg [WWIDTH-1:0] trans  [0:N-1];
+    (* ram_style = "distributed" *) reg [WWIDTH-1:0] spec_a [0:N-1];
+    (* ram_style = "distributed" *) reg [WWIDTH-1:0] spec_b [0:N-1];
     // prod[j1*M + j2]: pointwise product in frequency domain.
-    reg [WWIDTH-1:0] prod   [0:N-1];
+    (* ram_style = "distributed" *) reg [WWIDTH-1:0] prod   [0:N-1];
     // result[i1*M + i2]: output coefficients in row-major index order.
-    reg [WWIDTH-1:0] result [0:N-1];
+    (* ram_style = "distributed" *) reg [WWIDTH-1:0] result [0:N-1];
 
     // L=8 twiddle and multiplier lanes.
     reg  [L*WWIDTH-1:0]  mul_a_pack;
@@ -451,4 +459,4 @@ module bivar_ntt_top #(
     end
 endmodule
 
-`endif // _BIVAR_NTT_TOP_GUARD
+`endif // _BIVAR_NTT_TOP_V0_GUARD

@@ -16,9 +16,13 @@
 `define R_VAL 4
 `endif
 
+`ifndef N_VAL
+`define N_VAL 256
+`endif
+
 module tb_measure_cycles;
     localparam B      = 16;
-    localparam N      = 256;
+    localparam N      = `N_VAL;
     localparam R      = `R_VAL;
     localparam WWIDTH = B + 1;
     localparam Q      = (1 << B) + 1;

@@ -1,3 +1,10 @@
+# cache
+/.claude
+/.Xil
+.Xil/
+.claude/
+/synth
+
 # Python
 __pycache__/
 *.py[cod]
