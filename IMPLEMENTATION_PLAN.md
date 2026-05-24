@@ -13,7 +13,8 @@
 | Version | Date | Key changes |
 |---|---|---|
 | v1 | 2026-05-16 | Initial draft targeting Kintex-7 xc7k160t + DDR3 |
-| **v2** | **2026-05-16** | **Target moved to Xilinx Alveo U280 (HBM2). Pipelined sub-NTT default. URAM added as storage. Twiddle compression. Specialized cross-twiddle at level boundaries. Burst-length microbenchmark added. Comparison table now includes Koçer/Wang/Kurniawan/Supranational.** |
+| v2 | 2026-05-16 | Target moved to Xilinx Alveo U280 (HBM2). Pipelined sub-NTT default. URAM added as storage. Twiddle compression. Specialized cross-twiddle at level boundaries. Burst-length microbenchmark added. Comparison table now includes Koçer/Wang/Kurniawan/Supranational. |
+| **v3** | **2026-05-24** | **Reality check after Phase C and Phase D land. We over-shot targets by 3.7× LUT / 4× DSP and missed Fmax by 1.5×. None of the plan-critical optimizations (level-boundary sign-flip, quarter-cycle twiddle compression, BRAM twiddle ROM) were applied. Xing et al. (TC 2025) published a competitor for q=65537 that beats us 4.5× on LUT and 5.3× on time at N=1024. Adding §10 "Reality check" with measured-vs-planned table and the decision branches for the remaining work.** |
 
 ---
 
@@ -29,7 +30,7 @@ Before any prose, fix the numbers. All claims in this plan must be consistent wi
 | Coefficient width | WWIDTH = 17 bits | One bit beyond B=16 for normal-rep range [0, 2¹⁶] |
 | `ord_q(2)` | 32 | 2³² ≡ 1 (mod q); 2¹⁶ ≡ −1 |
 | Shift-only NTT max size at q=F₄ | **S_max = 32** | An S-pt NTT is shift-only iff ω_S is a power of 2 mod q, which requires S \| 32 |
-| Level-boundary cross-twiddle simplification | ψ^(j·32) = (−1)^j | ψ³² = 2¹⁶ = −1 ⇒ level-boundary cross-twiddles reduce to conditional negation, **no DSP needed** |
+| Level-boundary cross-twiddle simplification | ψ^(j·32) = (−1)^j | ψ³² = 2¹⁶ = −1 ⇒ level-boundary cross-twiddles reduce to conditional negation, **no DSP needed** ⚠️ **see §10.6 — this identity does NOT apply to our decomposition; the claim was wrong** |
 | 2N-th root of unity ψ for negacyclic | exists but not a power of 2 for 2N > 32 | Negacyclic pre-twist/un-twist requires generic ModMul |
 
 **Consequence:** the largest sub-NTT we can build *without DSPs* on q=65537 is 32-pt. Any decomposition into pieces larger than 32 requires real multipliers internally. **However**, the ψ^(j·32) = (−1)^j identity means cross-twiddles between adjacent 32-pt levels collapse to sign-flips — a free architectural win not exploited in our prior work.
@@ -596,3 +597,132 @@ For each branch point, the option with higher research relevance was selected:
 ---
 
 *This plan is intended to be reviewed. The cycle model in §0.6 and the LUT projections in §3 are anchored against the measured numbers in §0.5 and the Phase B individual-module syntheses, but all projections come with the standard ±30% caveat for hardware estimates. Numbers will be revised after each phase's measurement closes.*
+
+---
+
+## 10. Reality check (v3, after Phase C and Phase D)
+
+Phase C (N=1024, U280) and Phase D (N=32K, U280) are both functionally
+verified and synthesised. Numbers are in `IMPLEMENTATION_DOC.md` §1 and §8.7.
+**This section reconciles what we built against what the plan asked for and
+states what is still required for the paper's central claim to land.**
+
+### 10.1 Measured vs planned
+
+| Phase | Metric | Plan target | Measured | Ratio |
+|---|---|---|---|---|
+| C (N=1024) | LUT | ≤ 12 K | 43,854 | **3.7× over** |
+| C | DSP | ≤ 8 | 32 | **4× over** |
+| C | Fmax | ≥ 350 MHz | 180 MHz | **0.51× under** |
+| C | Time | ~1.5 µs | 13.8 µs | **9× slower** |
+| D (N=32K) | LUT | ≤ 13 K | 47,702 | **3.7× over** |
+| D | DSP | ≤ 8 | 32 | **4× over** |
+| D | Fmax | ≥ 350 MHz | 222 MHz | **0.63× under** |
+| D | Time | ~60 µs | 370 µs | **6× slower** |
+
+### 10.2 Why we missed: optimizations the plan assumed, but we did not apply
+
+| Optimization (planned in §1, §B.2, §B.4) | Implemented? | Lost benefit |
+|---|---|---|
+| Level-boundary sign-flip (ψ^(j·32)=(−1)^j → conditional negation, 0 DSP at boundaries) | **No** — generic ModMul at every cross-twiddle | Saved 8 DSPs × (d−1) boundaries + a pipeline stage per boundary |
+| Quarter-cycle twiddle compression (4× BRAM reduction) | **No** | 4× larger twiddle storage |
+| Twiddle ROM in BRAM (registered read or recurrence) | **No** — combinational LUTRAM | ~18–22 K LUT spent on twiddle ROMs |
+| 8-lane time-multiplexed budget (per §3 of `IMPLEMENTATION_DOC.md` §1) | **No** — built 32-lane parallel point | 4× the DSP count, ~3× the crossbar LUT |
+| Memory consolidation (1 working memory, ping-pong) | **No** — 4 separate banked memories | ~10–15 K LUT of crossbar duplication |
+
+We built the **highest-parallelism corner** of the architecture (32 lanes, 4 separate memories, combinational twiddle) instead of the plan's 8-lane time-multiplexed point with all the algorithmic shortcuts. The "+4× DSP" and "+3.7× LUT" overshoots are explained almost entirely by these five missing optimizations.
+
+### 10.3 The Xing et al. (TC 2025) benchmark we did not anticipate
+
+Xing et al., *"High-Radix/Mixed-Radix NTT Multiplication … Over Fermat Modulus"* (IEEE TC, Oct 2025), published a polynomial multiplier for **q = 65537 (our exact modulus)** on Virtex-7, with measured results up to N=1024:
+
+| Design | N | LUT | DSP | BRAM | Fmax | Time |
+|---|---|---|---|---|---|---|
+| Xing 1×R16 | 1024 | 9,783 | 16 | 0 | 274 MHz | **2.6 µs** |
+| Phase C (ours) | 1024 | 43,854 | 32 | 0 | 180 MHz | 13.8 µs |
+| Ratio | — | **4.5× over** | 2× over | — | 0.66× under | **5.3× slower** |
+
+At N=1024, Xing's iterative high-radix architecture is unambiguously better on every metric. Their LUT also stays nearly flat across N=256/512/1024 (+21% LUT for 4× N), so the "constant hardware as N grows" property is **not** unique to hierarchical decomposition — iterative single-butterfly designs already have it.
+
+**This does not refute the plan's central claim**, which is explicitly about HBM-resident large N (>10⁶), where Xing-style iterative would suffer from stride-2ˢ access patterns at late stages. But it does mean:
+
+- The Phase C / Phase D measured numbers in isolation do **not** demonstrate any architectural advantage over published SOTA.
+- The advantage, if any, lives at Phase E (N=10⁶ URAM) and Phase F (N≥10⁷ HBM-resident) — neither of which is built yet.
+
+### 10.4 Decision branches for the remaining work
+
+The original §1 claim still stands as a *hypothesis*. To turn it into a *measured result* requires one of:
+
+**Branch A — Push to Phase E and Phase F as originally planned.**
+- Apply the missing optimizations in §10.2 to get Phase C / D into the plan-target range (3–4 weeks).
+- Build Phase E (URAM-backed N=10⁶) and measure (~3 weeks).
+- Build Phase F as Phase E.2 HBM bandwidth microbenchmark + analytic projection (~2 weeks).
+- Total: ~2–3 months. Paper has a real, measured headline at the end.
+- **Risk:** the HBM stride-catastrophe claim depends on Xing-style architectures actually suffering at large N. If they have already addressed this (e.g., via memory tiling), our claim weakens.
+
+**Branch B — Scope down to an infrastructure paper.**
+- Publish Phase C / Phase D as the *first measured end-to-end multivariate (d=3, N=32K) NTT polynomial multiplier on Fermat modulus*.
+- Honestly compare against Xing et al. and acknowledge the LUT/DSP gap.
+- Frame contribution as: (i) the multivariate decomposition itself working at N=32K, (ii) the BRAM-banked storage primitive, (iii) the d-scaling demonstration (Phase C → D).
+- Total: ~3–4 weeks of writeup.
+- Target venue: workshop or domain-specific conference, not top-tier TC/TVLSI.
+
+**Branch C — Pivot to Xing-style architecture with Fermat-specific extensions.**
+- Drop hierarchical decomposition for the small-N path.
+- Build a competitive iterative R=16 on U280 with the level-boundary sign-flip identity grafted onto it (this is a *real* untapped optimization, independent of decomposition style).
+- Different paper, different scope.
+- Total: ~3 months. Probably stronger paper than (B), weaker than a successful (A).
+
+**Branch D — Hybrid: Xing-style inner sub-NTT inside hierarchical outer.**
+- Replace our 32-pt `sub_ntt32` with a Xing-style merged-pre-processing R16 module.
+- Keep the outer d-level hierarchy for HBM-friendly access patterns at large N.
+- Combines their efficiency at the L-scale with our access-pattern advantage at the N-scale.
+- Total: ~3 months. Most algorithmically novel of the four options.
+
+### 10.5 Current recommendation (subject to user direction)
+
+**Branch A** is what the original plan committed to and remains the highest-impact direction. The current Phase C / D infrastructure is not wasted under (A) — it is the necessary substrate for Phase E. But it does need the §10.2 optimizations applied before Phase E to keep area in line with what the plan promised.
+
+### 10.6 Correction: level-boundary sign-flip identity does NOT apply
+
+Plan §0.1 claims `ψ^(j·32) = (−1)^j` because `ψ³² = 2¹⁶ = −1`. This identity
+is only true if `ψ` itself has order 64, which requires `2N ≤ 64`, i.e.,
+`N ≤ 32`. For our actual N (1024 in Phase C, 32K in Phase D, 10⁶ in Phase E),
+ψ is a 2N-th primitive root with order 2048 / 65536 / 2×10⁶, and ψ³² is
+*not* −1.
+
+Walking the XTW1 twiddle exponent for Phase D explicitly:
+- XTW1 = `ψ^(2·L·i2·k3) = ψ^(64·i2·k3)` for L=32
+- ψ has order 2N = 65536 ⇒ ψ⁶⁴ has order 1024
+- `(ψ⁶⁴)^k = −1` requires `k = 512`
+- Need `i2·k3 = 512` with `i2, k3 ∈ [0,32)` ⇒ no solutions in range
+- So **zero** XTW1 elements are −1 (only 0-product cases give +1)
+
+Phase C (N=1024) is similarly sparse: only `i2·k3 ≡ 16 (mod 32)` gives ±1,
+which is a small minority of cross-twiddle pairs.
+
+Even where the identity *would* apply, it would save **cycles, not DSPs**.
+Our 32 DSPs are sized by max-phase usage (PWM and pre/un-twist), which
+need real ModMuls regardless of XTW phase behaviour. The plan's claim of
+"saves 8 DSPs per boundary" was therefore doubly wrong.
+
+**Action:** the sign-flip step has been removed from the Branch A plan.
+Section 10.5 is updated to reorder: (1) twiddle BRAM, (2) memory
+consolidation, (3) PWM/twist time-multiplex. Steps 2 and 3 are the path
+to 8 DSP, not the sign-flip identity.
+
+The 2.3 s headline projection for N=10⁹ at §1 ("level-boundary sign-flip
+identity removes ~⅓ of cycles") needs to be revised upward — the cycle
+model in §0.6 with `k_boundary` should treat all boundaries as full
+cross-twiddle (no sign-flip), reverting to the v1 cycle count for that
+component. The new projection is roughly 3.5–4 s at 350 MHz, still
+"practical at N=10⁹ on a single FPGA" but no longer specifically
+sub-3-seconds.
+
+**Branch B** is the lowest-effort exit and produces a publishable but modest contribution.
+
+**Branch C** abandons most of the existing RTL.
+
+**Branch D** is the most interesting but speculative.
+
+A reasonable hybrid is: **(A) with a side-by-side ablation** that shows the impact of each of the §10.2 optimizations on Phase C, then push to Phase E with the optimized datapath. The ablation table itself becomes a paper contribution alongside the large-N measurements.

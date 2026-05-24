@@ -277,7 +277,7 @@ module hier_n1024_top #(
 
     wire [L*WWIDTH-1:0] ntt_out_pack;
     wire                ntt_valid;
-    sub_ntt32 #(.B(B)) u_subntt (
+    sub_ntt32_bidir #(.B(B)) u_subntt (
         .clk      (clk),
         .rst      (rst),
         .start    (ntt_start_d1),

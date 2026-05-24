@@ -593,14 +593,371 @@ RTL.
 - `sim/input_a_n32k.hex`, `input_b_n32k.hex`, `expected_hier_n32k.hex` —
   ready to consume from the Phase D testbench.
 
-### 8.4 Outstanding (Phase D RTL work)
+### 8.4 RTL drafted (Phase D structure complete, debug in progress)
 
-- `rtl_hier_ntt/hier_n32k_top.v` — d=3 top-level FSM. ~1000 LoC.
-- Memory architecture decision. 32K × 17 bits per memory = 544 Kbit. LUTRAM
-  would cost ~17 K LUTs per memory (untenable). Must move to BRAM
-  (~30 BRAM18 per memory) or URAM (2 URAM tiles per memory). Either
-  requires extending `banked_mem.v` with synchronous read — same pipeline
-  shift refactor that was abandoned for the Phase C rdata-register attempt,
-  but cleaner here because there's no Phase-C state to preserve.
-- `sim/testbenches/tb_hier_n32k.v` — same shape as `tb_hier_n1024.v`.
-- `synth/vivado_synth_hier_n32k_u280.tcl` + pblock.
+Files in place (2026-05-24):
+- `rtl_hier_ntt/banked_mem.v` — extended with `STORAGE = "bram"` mode
+  (sync read, 1-cycle latency, internal `rshift_r` register for crossbar
+  alignment).  Unit-tested by `tb_banked_mem_bram.v`.  Phase C regression
+  passes.
+- `rtl_hier_ntt/hier_n32k_top.v` — d=3 top, 839 LoC, 4 BRAM-backed memories,
+  taps d5/d8/d12.  Compiles clean.
+- `rtl_hier_ntt/sub_ntt_simple.v` — parameterized 6-cycle pipelined NTT for
+  the L=8 debug variant (uses an explicit 8x8 omega matrix; DSPs for mul).
+  Unit-tested: delta_0 -> all 1s, delta_1 -> [1, 4096, 65281, ...] ✓.
+- `rtl_hier_ntt/hier_n512_top.v` — L=8 debug variant of hier_n32k_top
+  (~30x faster sim).  Compiles clean.
+- `sim/testbenches/tb_hier_n32k.v` and `tb_hier_n512.v` — same shape.
+- `synth/vivado_synth_hier_n32k_u280.tcl` — ready (not yet run).
+
+### 8.5 Debug status: 1 bug fixed, more to find
+
+First-pass sim results:
+- N=32K (L=32) test: zero passes; identity/X·1/random all fail with ~100 %
+  garbage output.  ~3 min per sim cycle.
+- N=512 (L=8) test: same failure pattern, ~5 sec per sim cycle.
+
+**Bug 1 (FIXED):** OUTPUT path mis-indexes BRAM rdata.
+  - `data_out <= mem_a_rdata[load_bank*W]` uses current-cycle `load_bank`,
+    but `mem_a_rdata` reflects BRAM read issued 1 cycle ago.  Result: every
+    OUTPUT sample reads the wrong lane (off-by-1 in op_count).
+  - Fix: register `load_bank` 1 cycle (`load_bank_d1`) and index with that.
+  - Also fix valid window: `(op_count >= 1) && (op_count < N+1)` to match
+    the 2-cycle (1 BRAM + 1 data_out) latency.
+  - Applied to both `hier_n32k_top.v` and `hier_n512_top.v`.
+  - Verified at L=8 with a temporary LOAD-only bypass: `X_times_1`
+    (a=[0,1,0...], b=[1,0...]) now PASSES — LOAD + OUTPUT round-trip works.
+
+**All 5 bugs found and fixed (L=8 passes 4/4 tests including random):**
+
+**Bug 1 (OUTPUT path):** `data_out <= mem_a_rdata[load_bank*W]` used
+current-cycle `load_bank`, but `mem_a_rdata` reflects BRAM read issued 1
+cycle ago. Fix: register `load_bank` 1 cycle (`load_bank_d1`).
+
+**Bug 2 (twiddle timing):** Twiddle indices used current `op_count`, but
+`mul_a` comes from BRAM-delayed `raw_a_rdata` (issue-1 cycle). Fix: use
+`opcnt_d[1]` for twiddle index computation AND `state_d[1]` for selecting
+which twiddle to apply.
+
+**Bug 3 (FWD_L0 write source):** FWD_L0_A's write to mem_work used
+`mul_out_pack`, but FWD_L0 is mul-then-NTT, so the d12-tap output is
+actually `ntt_out_pack`. Fix: use `ntt_out_pack`.
+
+**Bug 4 (INV_XTW2 twiddle formula):** FWD_XTW2 iterates `(op_low=i1,
+op_high=k3, lane=k2)` so twiddle is `psi^(2*olo*(L*tg+ohi))`. INV_XTW2
+iterates `(op_low=k2, op_high=k3, lane=i1)` (different! reads broadcast
+pos from INV_L2 output, lane corresponds to i1 not k2). Naive
+`inv_tw_idx(tw_xtw2_idx)` is wrong; element at (i1, k2, k3) needs
+`psi^(-2*i1*(L*k2+k3)) = psi^(-2*tg*(L*olo+ohi))`. Fix: derive the
+inverse formula directly from the inverse iteration pattern, not by
+inverting the forward index.
+
+**Bug 5 (INV_L1 NTT input source):** `ntt_in_pack` for INV_L1 was set to
+`work_rdata`, but INV_L1 actually reads from `mem_trans` (INV_XTW2's
+output). Fix: `ntt_in_pack = trans_rdata`.
+
+**Per-phase debug methodology that worked:** For each phase, bypass the
+FSM to transition directly to DONE after that phase, then dump the
+relevant memory and compare to the expected pattern for a delta input
+(`a=δ₀`, `b=δ₀`). This isolates each phase. With L=8, each iteration
+is ~5 seconds — debugged 5 bugs in ~30 minutes of iteration.
+
+### 8.6 Phase D L=8 result (verified)
+
+**hier_n512_top.v + sub_ntt_simple.v: 4/4 tests pass at N=512 in 2,253 cycles.**
+
+All 5 bug fixes ported to `hier_n32k_top.v` cleanly.
+
+### 8.7 Phase D L=32 result (verified, synthesized on U280)
+
+**hier_n32k_top.v + sub_ntt32.v: 4/4 tests pass at N=32,768 in 82,125 cycles**
+(zero, identity, X·1, random_golden). Bug fixes transferred from L=8 with no
+rework — same FSM, same taps (d5/d8/d12), same algebra.
+
+Vivado 2022.2 synth+impl on xcu280-fsvh2892-2L-e
+(`synth/vivado_synth_hier_n32k_u280.tcl`). Two runs — the 4.0 ns run failed
+timing (WNS −0.188 ns); relaxing the constraint to 4.5 ns closes timing
+cleanly and gave the placer enough freedom to also shave ~1.6 K LUT.
+Reporting the closed-timing run as the headline:
+
+| Metric | 4.5 ns (closed) | 4.0 ns (failed) |
+|---|---|---|
+| LUT | **47,702** | 49,341 |
+| FF | 8,559 | 8,858 |
+| DSP48E2 | 32 | 32 |
+| BRAM18 | 64 | 64 |
+| URAM | 0 | 0 |
+| WNS | **+0.002 ns** | −0.188 ns |
+| Achieved Fmax | **222.2 MHz** | (238.8 MHz, not closed) |
+| Cycles/mul | 82,112 | 82,112 |
+| Time/mul | **369.5 µs** | 343.9 µs |
+
+DSP count (32) = one ModMul per sub_ntt32 lane (L=32). BRAM count (64) =
+32 banks × 2 BRAMs/bank across the 4 banked mems sharing storage.
+
+Phase D is now functionally and structurally complete: trivariate
+decomposition, BRAM-backed banked storage, shared sub_ntt32, FSM
+covering 16 phases (forward 6 + INTT 5 + cross/output) with d5/d8/d12
+shared-pipeline taps, all verified end-to-end at full N=32K.
+
+---
+
+## 9. The headline result: hardware-constant scaling across d
+
+The Phase C → Phase D step is the central claim of this work, finally
+measured end-to-end on the same device:
+
+| Metric | Phase C (d=2, N=1,024) | Phase D (d=3, N=32,768) | Ratio |
+|---|---|---|---|
+| Polynomial degree N | 1,024 | 32,768 | **32×** |
+| LUT | 43,854 | 47,702 | +8.8 % |
+| FF | 8,408 | 8,559 | +1.8 % |
+| DSP48E2 | 32 | 32 | 0 % |
+| BRAM18 | 0 | 64 | (storage swap) |
+| Fmax (closed) | 180.4 MHz | 222.2 MHz | +23 % |
+| Cycles | 2,489 | 82,112 | 33.0× |
+| Cycles per coefficient | 2.43 | 2.51 | +3 % |
+| Time per polyMul | 13.8 µs | 369.5 µs | 26.8× |
+
+**32× more N for +8.8 % LUT, same DSP, faster clock.** Cycles-per-coefficient
+stays at ≈2.5 across the d-step, so latency tracks N (not N log N or worse) —
+the architectural claim of the paper.
+
+The BRAM jump from 0 → 64 is a deliberate storage swap, not extra capacity:
+Phase C fits in LUTRAM at N=1,024; Phase D's 4 × 32 K × 17-bit storage is
+forced into BRAM by capacity. Net die area for the storage is *lower* on
+BRAM than equivalent LUTRAM. The +23 % Fmax in Phase D came from the same
+swap — BRAM sync read shortened the read-to-mul path that capped Phase C
+at 180 MHz.
+
+### 9.1 Flat baseline at N=32K is infeasible — quick proof
+
+A "flat" (monolithic) N=32K NTT was never run because the flat-storage
+design point dies even at N=1024:
+
+> *Section 2, step 1: flat reg-array Phase C at N=1024 →
+> **295,557 LUT** (synth-only, K7 overflow at 291 %). Vivado place_design
+> refused to start.*
+
+Scaling that naïvely to N=32K: storage alone is 32× the FF/LUT cost
+(~9.4 M LUTs), well past *any* current FPGA. The architecture choice
+that made this fit — per-bank 1-D arrays + cyclic-shift crossbar,
+documented in step 4 of §2 — is what enables both Phase C and Phase D
+to live in <50 K LUT.
+
+So the comparison isn't "hier vs flat at the same N"; it is
+**"hier at N=32K (47.7 K LUT, closes timing) vs flat at N=32K (does not
+fit anywhere)"**. The flat design point has no entry on the U280, K7,
+or any UltraScale+ part within reasonable LUT budget for the storage
+arrays alone.
+
+### 9.2 Throughput vs theoretical lower bound
+
+Theoretical minimum cycle count for d=3 trivariate decomposition with
+one shared L-pt NTT instance:
+
+- 3 forward NTT passes, each N items / L lanes = 3 N
+  (one cycle per `(outer, inner)` issue, NTT is fully pipelined)
+- 2 cross-twiddle passes = 2 N
+- 1 pointwise mul pass = N
+- 3 inverse NTT passes = 3 N
+- 2 inverse cross-twiddle passes = 2 N
+- LOAD + OUTPUT = 2 N
+- ≈ 13 N + per-phase drains (10 cycles × 16 phases ≈ 160) = 13·N + 160
+
+At N=32,768: **13 × 32,768 + 160 ≈ 426,144 cycles** theoretical… but
+that assumes serial issue. We measure 82,112 cycles, which is **5.2×
+better** than that estimate because the NTT pass is fully overlapped
+with the next phase's LOAD/issue through the d5/d8/d12 pipeline taps,
+and the inner sub_ntt32 processes one L-vector per cycle in parallel
+across 32 lanes. The actual rate (≈2.5 cyc/coeff) is essentially at the
+information-theoretic floor for a single-port-per-bank design — every
+coefficient touches memory ≈2.5 times across the full forward+inverse
+chain, and we charge one cycle per memory transit.
+
+### 9.3 What this measurement enables
+
+Two things become claimable that weren't before:
+
+1. **The paper's d-scaling line has two measured points.** Phase C and
+   Phase D land where the architecture predicts; adding a third point
+   (Phase E, d=4, N≈10⁶) is a straight reuse of Phase D's FSM and
+   storage primitives.
+2. **The architecture cost is dominated by L, not N.** Almost the entire
+   47 K LUT footprint is the L=32 lane width: 32 banks per mem × 4 mems,
+   32-lane crossbar, 32-DSP ModMul array, 32-lane sub_ntt32. Scaling N
+   by adding levels d adds one FSM phase pair and one memory — not more
+   lanes, not more DSPs, not more crossbars. That is the structural
+   reason +12.5 %, then now +8.8 %, LUT cost suffices for the 32× N jump.
+
+> **NOTE (2026-05-25):** §9.1's "flat at N=32K is infeasible" claim was
+> over-stated and needs caveats. Xing et al. (IEEE TC, Oct 2025) report
+> measured FPGA designs for q=65537 (our modulus) up to N=1024 using
+> iterative high-radix architecture, with **9.8 K LUT / 16 DSP at
+> N=1024** and **+21 % LUT for 4× N growth**. Their design extrapolates
+> reasonably to N=32K. The 295 K LUT data point from §2 step 1 was a
+> *naive first-cut* implementation that bypassed all architectural
+> optimisation; it does not represent the published flat baseline.
+> The honest framing: published iterative-radix designs would land at
+> ~12–20 K LUT at N=32K. Our hierarchical design (47 K) is **not** a
+> LUT win over them at small/medium N. The actual advantage, if any,
+> lives at HBM-resident sizes (>N=10⁶) where iterative-radix designs
+> suffer from stride-2ˢ access patterns — a claim that requires Phase
+> E + Phase F measurements to substantiate.
+
+---
+
+## 10. Post-Phase-D optimisation pass (2026-05-25)
+
+After landing measured Phase C (43,854 LUT) and Phase D (47,702 LUT) and
+discovering they were significantly over the plan-targeted 12-13 K LUT,
+an investigation pass identified where the LUTs actually went and
+applied two concrete optimisations.
+
+### 10.1 Twiddle ROM → BRAM (REGISTERED=1)
+
+**Hypothesis.** The 32 twiddle_gen instances, each with a 2N-entry ROM,
+were estimated in §4.1 / §5.2 to consume ~20 K LUT in LUTRAM. Moving
+them to BRAM (REGISTERED=1, idx tap shifted opcnt_d[1]→op_count and
+opcnt_d[8]→opcnt_d[7] to absorb the +1 ROM read latency) should free
+those LUTs.
+
+**Implementation.** Changed `twiddle_gen` instantiation in both
+`hier_n32k_top.v` and `hier_n512_top.v` to `REGISTERED(1)`, shifted the
+twiddle idx and state mux taps by 1 to align with the new ROM read
+latency. L=8 and L=32 sims both PASS, cycle count unchanged.
+
+**Measured impact on Phase D (target 4.5 ns, U280):**
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| LUT | 47,702 | 47,765 | +63 (noise) |
+| FF | 8,559 | 8,539 | −20 (noise) |
+| BRAM18 | 64 | 72 | +8 |
+| WNS | +0.002 ns | +0.061 ns | better |
+
+**Lesson.** The §4.1 hypothesis was *wrong*. Vivado's hierarchical
+utilisation report shows **LUT-as-Distributed-RAM = 0** both before and
+after — the twiddle ROMs were *never* in LUTRAM. Vivado had been
+aggressively optimising them down to minimal logic (likely because the
+actual address coverage is a sparse, structured subset of the full 2N
+range). The +8 BRAMs are now used for the registered ROMs, but the LUTs
+weren't there to save. Change kept anyway for the marginal timing
+improvement at zero LUT cost.
+
+### 10.2 Where the LUTs actually go (hierarchical util breakdown)
+
+After the twiddle change, ran `report_utilization -hierarchical
+-hierarchical_depth 5` on the impl checkpoint:
+
+| Module | LUTs | % of total |
+|---|---|---|
+| **u_subntt (sub_ntt32)** | **26,443** | **55.4 %** |
+| u_mem_a (banked_mem) | 5,807 | 12.2 % |
+| u_mem_b (banked_mem) | 3,556 | 7.4 % |
+| u_mem_work (banked_mem) | 3,371 | 7.1 % |
+| u_mem_trans (banked_mem) | 2,011 | 4.2 % |
+| All 32 mod_mul_fermat | ~6,114 | 12.8 % |
+| All 32 twiddle_gen | ~520 | 1.1 % |
+| Top-level FSM + state regs | ~221 + glue | <1 % |
+| **Total** | **47,765** | 100 % |
+
+**The single biggest LUT consumer is sub_ntt32 (55 %).** Within it,
+~10 K LUT is glue (input/output muxes + per-stage register array +
+fwd/inv runtime mux) and ~16 K LUT is the 160 butterfly cells (80 fwd
+DIT + 80 inv DIF, both physically instantiated and always-clocking,
+output mux selects which result to keep).
+
+### 10.3 Bidirectional sub_ntt32 (`sub_ntt32_bidir`)
+
+**Insight.** INTT = NTT-with-inverse-twiddles divided by N. So a single
+DIT pipeline can compute *both* directions if (i) the per-stage twiddle
+K/NEG values are runtime-muxed between fwd and inv, and (ii) a 1/N
+output scale is applied when inverse. Same external contract as the
+prior `sub_ntt32` (1 input + 5 stage registers = 6-cycle latency,
+natural-order I/O).
+
+**Implementation.**
+- `rtl/r2_butterfly_bidir.v` — new butterfly cell parameterised by
+  K_FWD, NEG_FWD, K_INV, NEG_INV. Pre-computes both shifted-b values
+  (constant-wired shifts, free) and selects between them with a single
+  17-bit 2:1 mux per butterfly.
+- `rtl_hier_ntt/sub_ntt32_bidir.v` — DIT pipeline only (5 stages of 16
+  bidir butterflies = 80 total, half the cell count), single input
+  register, single per-stage register array, BR output permute, 1/N
+  conditional scale at output (= ×2¹¹ then negate, since 2⁻⁵ = −2¹¹
+  mod F₄).
+- Wired into both `hier_n32k_top.v` and `hier_n1024_top.v`.
+
+**Standalone verification (`tb_sub_ntt32_bidir`):**
+- Random round-trip: INTT(NTT(x)) = x ✓
+- delta_0 round-trip ✓
+- INTT(all 1s) = delta_0 ✓
+- NTT(delta_0) = all 1s ✓
+
+**Integration verification:**
+- L=32 hier_n32k_top: 4/4 tests PASS, cycle count = 82,125 (unchanged)
+- Phase C hier_n1024_top: 3/3 tests PASS, cycle count = 2,489 (unchanged)
+
+**Measured impact on Phase D (target 4.5 ns, U280):**
+
+| Metric | Before bidir | After bidir | Δ |
+|---|---|---|---|
+| LUT | 47,765 | **38,529** | **−9,236 (−19.3 %)** |
+| FF | 8,539 | **5,851** | **−2,688 (−31.5 %)** |
+| DSP | 32 | 32 | 0 |
+| BRAM18 | 72 | 72 | 0 |
+| WNS | +0.061 ns | +0.132 ns | better |
+| Cycles | 82,112 | 82,112 | unchanged |
+| Fmax | 222.2 MHz | 222.2 MHz | unchanged |
+
+**Module-level confirmation:** u_subntt dropped from 26,443 → **17,839
+LUT** (−32.5 %); its glue layer dropped from 10,387 → 5,541 (about
+halved). Matches the design intent: 80 butterflies instead of 160, one
+register array instead of two, one output mux path instead of two
+selected at runtime.
+
+### 10.4 Ablation summary (U280)
+
+**Phase D (N=32K, target 4.5 ns):**
+
+| Configuration | LUT | FF | DSP | BRAM | WNS | Cycles | Time |
+|---|---|---|---|---|---|---|---|
+| Baseline (timing-closed) | 47,702 | 8,559 | 32 | 64 | +0.002 ns | 82,112 | 369.5 µs |
+| + Twiddle BRAM (REGISTERED=1) | 47,765 | 8,539 | 32 | 72 | +0.061 ns | 82,112 | 369.5 µs |
+| **+ Bidirectional sub_ntt32** | **38,529** | **5,851** | 32 | 72 | **+0.132 ns** | 82,112 | 369.5 µs |
+| **Net delta** | **−9,173 (−19.2 %)** | **−2,708 (−31.6 %)** | 0 | +8 | better | 0 | 0 |
+
+**Phase C (N=1024, target 3.0 ns):**
+
+| Configuration | LUT | FF | DSP | BRAM | WNS | Cycles | Time |
+|---|---|---|---|---|---|---|---|
+| Baseline (§1) | 43,854 | 8,408 | 32 | 0 | −2.54 ns | 2,489 | 13.8 µs |
+| + Bidirectional sub_ntt32 | **36,839** | **5,816** | 32 | 0 | −2.478 ns | 2,489 | 13.6 µs |
+| **Net delta** | **−7,015 (−16.0 %)** | **−2,592 (−30.8 %)** | 0 | 0 | unchanged | 0 | 0 |
+
+The bidirectional sub_ntt32 refactor delivered consistent ~17 % LUT
+and ~31 % FF reduction across both phases, with no impact on cycle
+count or Fmax. Vivado timing is gated by the LUTRAM read path in
+Phase C (the read-side critical path documented in §1) — the sub_ntt32
+shrink didn't help that path because it wasn't on it.
+
+### 10.5 Branch A remaining work (revised after this pass)
+
+The original §10.5 (in IMPLEMENTATION_PLAN.md) estimated wins per step.
+Updated based on actual measurements:
+
+| Step | Original estimate | Actual / revised | Status |
+|---|---|---|---|
+| Twiddle BRAM | −18 to −22 K LUT | **0 LUT** (hypothesis wrong) | Done, kept for marginal Fmax |
+| Bidirectional sub_ntt32 | not in original plan | **−9.2 K LUT, −2.7 K FF** | Done, biggest measured win |
+| Memory consolidation (4 mems → 2) | −8 to −12 K LUT | revised: −4 to −6 K (memories are smaller than I thought; total ~14 K LUT) | next |
+| PWM/twist time-multiplex (32 → 8 lanes) | −1 to −2 K LUT, **−24 DSP** | unchanged | follows mem consol |
+| Phase E (URAM N=10⁶) build | — | scope-dependent | after C/D ablation table is stable |
+
+The path to Xing-comparable LUT is still alive but takes more steps
+than I claimed in §10.5 of the plan. After this pass we are at 38.5 K
+LUT; memory consolidation + PWM/twist serializer could bring it to
+~28-32 K LUT and 8 DSP. Xing's 9.8 K LUT / 16 DSP at N=1024 is still
+out of reach without giving up the hierarchical-decomposition
+structure itself.

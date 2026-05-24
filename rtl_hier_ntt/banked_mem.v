@@ -24,7 +24,12 @@ module banked_mem #(
     parameter integer DEPTH        = 32,
     parameter integer LOG_LANES    = 5,
     parameter integer LOG_DEPTH    = 5,
-    parameter integer READ_LATENCY = 0   // 0: combinational read; 1: registered.
+    parameter integer READ_LATENCY = 0,  // 0: combinational; 1: registered
+    parameter         STORAGE      = "lutram"  // "lutram" | "bram"
+    // STORAGE = "bram": BRAM18 inference per bank. Read is SYNCHRONOUS
+    // (1-cycle inherent latency), so READ_LATENCY=1 is forced regardless
+    // of the parameter.  Use BRAM mode when DEPTH > 64 (LUTRAM gets
+    // expensive past that point).
 )(
     input  wire                              clk,
     // ---- Read interface ------------------------------------------------------
@@ -65,27 +70,52 @@ module banked_mem #(
     endgenerate
 
     // -------------------------------------------------------------------------
-    // Each bank: a 1D distributed-RAM-inferrable storage
+    // Each bank: per-STORAGE inference.
+    //   "lutram" : 1-D distributed-RAM (RAM32X1S / RAM64X1S), combinational read.
+    //   "bram"   : 1-D block-RAM (RAMB18E2), synchronous read (1-cycle latency).
+    //              Read address is registered inside the RAM primitive; the read
+    //              data emerges one clock after the read address is presented.
     // -------------------------------------------------------------------------
     generate
-        for (b = 0; b < LANES; b = b + 1) begin : g_bank_storage
-            (* ram_style = "distributed" *)
-            reg [WWIDTH-1:0] mem [0:DEPTH-1];
-            always @(posedge clk) begin
-                if (bank_we[b]) mem[bank_waddr[b]] <= bank_wdata[b];
+        if (STORAGE == "lutram") begin : g_lutram_storage
+            for (b = 0; b < LANES; b = b + 1) begin : g_bank
+                (* ram_style = "distributed" *)
+                reg [WWIDTH-1:0] mem [0:DEPTH-1];
+                always @(posedge clk) begin
+                    if (bank_we[b]) mem[bank_waddr[b]] <= bank_wdata[b];
+                end
+                assign bank_rdata[b] = mem[bank_raddr[b]];
             end
-            assign bank_rdata[b] = mem[bank_raddr[b]];
+        end else begin : g_bram_storage
+            for (b = 0; b < LANES; b = b + 1) begin : g_bank
+                (* ram_style = "block" *)
+                reg [WWIDTH-1:0] mem [0:DEPTH-1];
+                reg [WWIDTH-1:0] rdata_r;
+                always @(posedge clk) begin
+                    if (bank_we[b]) mem[bank_waddr[b]] <= bank_wdata[b];
+                    rdata_r <= mem[bank_raddr[b]];   // sync read
+                end
+                assign bank_rdata[b] = rdata_r;
+            end
         end
     endgenerate
 
     // -------------------------------------------------------------------------
-    // Lane-side rdata: lane k -> bank (k + rshift) mod LANES
+    // Lane-side rdata: lane k -> bank (k + rshift_eff) mod LANES.
+    //
+    // BRAM mode: bank_rdata is 1-cycle delayed (sync read), so rshift_eff
+    // must also be 1-cycle delayed to align the crossbar with the right
+    // data.  LUTRAM mode: rshift_eff = rshift (combinational).
     // -------------------------------------------------------------------------
+    reg [LOG_LANES-1:0] rshift_r;
+    always @(posedge clk) rshift_r <= rshift;
+    wire [LOG_LANES-1:0] rshift_eff = (STORAGE == "bram") ? rshift_r : rshift;
+
     wire [LANES*WWIDTH-1:0] rdata_pack_comb;
     genvar k;
     generate
         for (k = 0; k < LANES; k = k + 1) begin : g_lane_rd
-            wire [LOG_LANES-1:0] bnk = (k[LOG_LANES-1:0] + rshift) & {LOG_LANES{1'b1}};
+            wire [LOG_LANES-1:0] bnk = (k[LOG_LANES-1:0] + rshift_eff) & {LOG_LANES{1'b1}};
             assign rdata_pack_comb[k*WWIDTH +: WWIDTH] = bank_rdata[bnk];
         end
     endgenerate

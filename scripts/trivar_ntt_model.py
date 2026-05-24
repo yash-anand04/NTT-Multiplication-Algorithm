@@ -54,18 +54,18 @@ from bivar_ntt_model import poly_mul_direct, Q, get_psi, modinv
 # In F_4 = 2^16+1, ord(2) = 32, so omega = 2 makes a 32-point NTT trivially
 # shift-only.  We use this for the inner 32-point NTTs.
 
-def _ntt32(vec: List[int], inverse: bool = False, root: int = None) -> List[int]:
-    """32-pt NTT with canonical primitive 32nd root  omega_32 = 3^((q-1)/32) mod q.
+def _ntt_L(vec: List[int], inverse: bool = False, root: int = None) -> List[int]:
+    """L-pt NTT with canonical primitive L-th root omega_L = 3^((q-1)/L) mod q.
 
     The canonical root makes cross-twiddle exponents like psi^(2*k1*i2) align
     algebraically (since psi = 3^((q-1)/(2N)) and the rest of Cooley-Tukey is
-    derived from a single generator g=3).
+    derived from a single generator g=3).  Works for any L | (q-1).
     """
     n = len(vec)
-    if n != 32:
-        raise ValueError("ntt32 expects length 32")
+    if (Q - 1) % n != 0:
+        raise ValueError(f"L={n} must divide q-1={Q-1}")
     if root is None:
-        root = pow(3, (Q - 1) // n, Q)        # primitive 32nd root from generator 3
+        root = pow(3, (Q - 1) // n, Q)
     omega = root if not inverse else modinv(root, Q)
     out = [0] * n
     for j in range(n):
@@ -80,6 +80,11 @@ def _ntt32(vec: List[int], inverse: bool = False, root: int = None) -> List[int]
         inv_n = modinv(n, Q)
         out = [(v * inv_n) % Q for v in out]
     return out
+
+
+# Back-compat alias for existing callers (Phase C tests).
+def _ntt32(vec, inverse=False, root=None):
+    return _ntt_L(vec, inverse, root)
 
 
 def _bivar_phaseC_algorithm(a: List[int], b: List[int]) -> List[int]:
@@ -248,15 +253,15 @@ def trivar_poly_mul_composed(a: List[int], b: List[int], n: int = 32768) -> List
     raise NotImplementedError("Composed trivariate needs a separate inner-cyclic NTT primitive")
 
 
-def trivar_poly_mul(a: List[int], b: List[int], n: int = 32768) -> List[int]:
+def trivar_poly_mul(a: List[int], b: List[int], n: int = 32768, L: int = 32) -> List[int]:
     """
     Compute c = a * b mod (X^n + 1) using the trivariate NTT decomposition.
 
     Returns the negacyclic product as a flat list of n coefficients.
+    Parameterized by L; requires n = L^3 and L | (q-1).
     """
-    L = 32
     if n != L * L * L:
-        raise ValueError(f"trivar_poly_mul requires N = {L*L*L} (L=32^3)")
+        raise ValueError(f"trivar_poly_mul requires N = {L*L*L} for L={L}")
 
     psi = get_psi(n, Q)            # primitive 2N-th root
     inv_psi = modinv(psi, Q)
