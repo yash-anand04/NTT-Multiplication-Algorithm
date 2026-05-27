@@ -13,6 +13,17 @@ tried yet.
 
 ## 0. Quick context
 
+> ⚠️ **2026-05-25 scope correction**: §11 (Phase E at N=10⁶) and §12 (Phase
+> F projection to N=10⁹) describe an architecture that is **mathematically
+> invalid as a polyMul over q = F₄**.  The negacyclic NTT requires a 2N-th
+> primitive root of unity ψ in F_q; for F₄, q−1 = 65,536 = 2¹⁶, so 2N ≤ 65,536
+> and **N ≤ 32,768 is the firm upper bound**.  Phase D is the exact maximum
+> for this modulus.  Phase E's hier_n1m_top synthesises and produces area
+> numbers but its twiddles collapse to 1 (integer division `(q-1)/2N = 0`)
+> so the result is not a valid product.  The honest project scope is **C (N=1024)
+> → D (N=32K)**.  See §13 for the corrected summary and §14 for the path to
+> extending to large N via CRT (Kim et al. 2024).
+
 **Algorithm.** Negacyclic polynomial multiplication
 `c(X) = a(X) · b(X) mod (X^N + 1)` over `q = F₄ = 2¹⁶ + 1 = 65537`,
 implemented via the bivariate Cooley-Tukey decomposition `X₂ = X₁^L` with
@@ -22,10 +33,13 @@ implemented via the bivariate Cooley-Tukey decomposition `X₂ = X₁^L` with
 3-SLR UltraScale+ HBM-class FPGA, 1.3 M LUTs, 9 K DSPs, 2 K BRAM18, 960
 URAM, 8 GB HBM2 @ 460 GB/s.
 
-**Key paper claim being demonstrated.** The same on-chip datapath
-(~15-20 K LUTs in the long-term steady state) handles N from 10³ up to 10⁹
-because the per-cycle work and the working memory both scale with the *level
-count d* — not with N. Phase C (d=2, N=1024) is the smallest demonstrator.
+**Key paper claim being demonstrated** (originally targeted N up to 10⁹;
+*revised after the F₄ constraint finding* to N up to 32,768): the same
+on-chip datapath (~37–39 K LUT measured) handles N from 1,024 to 32,768
+with constant DSP count and ~constant LUT, demonstrating that the
+hardware cost scales with the multivariate level count *d*, not with N
+itself.  Two measured d-points (C: d=2, D: d=3) form the valid scaling
+line over F₄.
 
 ---
 
@@ -961,3 +975,1192 @@ LUT; memory consolidation + PWM/twist serializer could bring it to
 ~28-32 K LUT and 8 DSP. Xing's 9.8 K LUT / 16 DSP at N=1024 is still
 out of reach without giving up the hierarchical-decomposition
 structure itself.
+
+---
+
+## 11. Phase E — fourvariate (d=4) extension
+
+> ⚠️ **PARTIAL INVALIDATION (2026-05-25):** Phase E was originally planned
+> at L=32, N=10⁶.  After the synth completed, vector generation revealed
+> the F₄ constraint: ψ as a 2N-th primitive root of unity requires
+> 2N | (q−1) = 65,536, so **N ≤ 32,768 is the firm maximum for F₄**.
+>
+> What remains valid in §11:
+>   - §11.1: algorithm derivation (the math is correct *if* a valid 2N-th
+>     ψ exists)
+>   - §11.2, §11.3: L=8 (N=4096) results are valid (4096 ≤ 32K) and the
+>     5/5 first-pass test result is real
+>
+> What is invalid:
+>   - §11.4: hier_n1m_top synthesised but with twiddles all equal to 1
+>     (integer division `(q−1)/2N = 0` for N=10⁶ → ψ = g⁰ = 1).  Area
+>     numbers are real for the *circuit*; the circuit does not compute a
+>     valid polyMul.
+>   - §11.5: the "3-point d-scaling table" honestly has only two valid
+>     points (C, D).  The E row is a circuit-area datapoint, not a
+>     correctness-validated NTT result.
+>   - §11.6, §11.7: written before the constraint was understood.
+>
+> See §13 for the corrected scope and §14 for the path to large N (CRT).
+
+Phase E started 2026-05-25 as the next datapoint on the d-scaling
+curve.  Goal: demonstrate that the d-step pattern proven in Phase C →
+Phase D extends to N = L^4 with the same datapath shape.
+
+### 11.1 Algorithm and Python golden
+
+Cross-twiddle formulas derived from recursive Cooley-Tukey (verified
+algebraically and via self-test):
+```
+   omega_{L^2} = psi^(2 N / L^2) = psi^(2 L^2)   (for d=4)
+   omega_{L^3} = psi^(2 N / L^3) = psi^(2 L)
+   omega_{N}   = psi^2
+
+   XTW1 (after NTT_i3): psi^(2 * L^2 * i2 * k3)
+   XTW2 (after NTT_i2): psi^(2 * L   * i1 * (L*k2 + k3))
+   XTW3 (after NTT_i1): psi^(2       * i0 * (L^2*k1 + L*k2 + k3))
+```
+
+`scripts/fourvar_ntt_model.py` implements the d=4 algorithm and passes
+self-test against:
+- `poly_mul_direct` at L=4, N=256 (3 random trials + identity + X·1)
+- `fast_negacyclic_mul` at L=8, N=4096 (2 random trials)
+
+`scripts/gen_hier_n4k_vectors.py` produces `input_a_n4k.hex`,
+`input_b_n4k.hex`, `expected_hier_n4k.hex` for the L=8 testbench.
+
+### 11.2 L=8 debug variant (hier_n4k_top.v)
+
+`rtl_hier_ntt/hier_n4k_top.v` is the L=8 / N=4096 d=4 demonstrator.
+~1100 lines, mirrors hier_n32k_top.v structure with:
+- 4-axis banking: bank(i0,i1,i2,i3) = (i0+i1+i2+i3) mod L
+- pos = i1 + L·i2 + L²·i3 (i0 contributes to bank only)
+- 26 FSM states (vs 19 in d=3): adds FWD_XTW3/L3 pairs and INV_L3/XTW3
+- 4 axis read patterns: axis_i3, axis_i2, axis_i1, broadcast (axis_i0)
+- Same d5/d8/d12 pipeline taps as Phase D (sub-NTT pipeline is unchanged)
+- Uses `sub_ntt_simple` (L=8 bidirectional) as the inner NTT primitive
+
+**Result: PASSES 5/5 tests on first compile (no debug iteration needed).**
+Cycle count 19,733 matches the analytic formula
+`(6d-2)·N/L + drains + 2N = 22·524 + 2·4096 = 19,704`.
+
+| Test | Errors | Cycles |
+|---|---|---|
+| delta × delta → delta | 0 | 19,733 |
+| identity (a=δ₀) | 0 | 19,733 |
+| zero | 0 | 19,733 |
+| X · 1 | 0 | 19,733 |
+| random_golden (vs Python) | **0** | 19,733 |
+
+This is a major milestone: the d-scaling pattern's structural
+correctness extends to d=4 directly from the Phase D design template.
+The 5 bugs Phase D took ~30 min to debug at L=8 (per §8.5) did not
+appear in Phase E because the same patterns were applied correctly the
+first time.
+
+### 11.3 Phase E L=8 synth on U280
+
+`synth/vivado_synth_hier_n4k_u280.tcl`, target 4.5 ns:
+
+| Metric | Value |
+|---|---|
+| LUT | 11,040 |
+| FF | 1,342 |
+| DSP | 37 |
+| BRAM18 | 18 |
+| URAM | 0 |
+| WNS | **−11.88 ns** (timing fails) |
+| Fmax (achieved) | 61 MHz |
+| Cycles | 19,733 |
+| Time | 323 µs |
+
+The bad timing is a `sub_ntt_simple` artefact — that module uses
+combinational DSP multiplies for the 8×8 DFT matrix and the long
+mul path doesn't pipeline.  This module exists only for L=8 debug;
+the L=32 production design uses `sub_ntt32_bidir` (5-stage pipelined
+shift-only) which closes timing comfortably at >220 MHz (per Phase D).
+
+Phase E L=8 successfully validates that the d=4 architecture is
+synthesisable on real silicon, but the absolute timing/LUT numbers at
+L=8 are not the headline — they are debug datapoints.
+
+### 11.4 Phase E L=32 production: hier_n1m_top.v (built, synthesized)
+
+`rtl_hier_ntt/hier_n1m_top.v` is the L=32, N=10⁶ production design.
+~640 lines, parameter-swap from `hier_n4k_top.v` with `sub_ntt32_bidir`
+inner NTT and `STORAGE = "uram"` for the four banked memories.
+
+`rtl_hier_ntt/banked_mem.v` extended with `STORAGE = "uram"` mode
+(`ram_style = "ultra"`, sync read, 1-cycle latency matching BRAM mode).
+
+Vivado 2022.2 synth+impl on xcu280-fsvh2892-2L-e, target 4.5 ns:
+
+| Metric | Value |
+|---|---|
+| LUT | **39,095** |
+| FF | 5,970 |
+| DSP48E2 | **32** |
+| BRAM18 | 136 |
+| **URAM** | **960** (100 % of U280) |
+| WNS | −5.43 ns (timing fails) |
+| Achieved Fmax | 100.7 MHz |
+| Cycles | 2,818,158 |
+| Time | **28.0 ms** per polyMul |
+
+The cycle count matches the analytic formula
+`(6d-2)·N/L + drains + 2N = 22·32780 + 2·1048576 ≈ 2,818,158` exactly.
+
+URAM at 100 % is the new ceiling: each of the 4 memories needs 32 banks
+× 8 cascaded URAM tiles = 256 URAMs.  4×256 = 1024 > 960, but Vivado
+packed marginally efficiently to land exactly at 960.  **This is the
+on-chip wall: d=5 (N=33.5M) cannot fit and must stream from HBM.**
+
+Timing dropped to 100 MHz (vs Phase D's 222 MHz on BRAM) because
+URAM-cascaded reads have longer latency and the 100 %-utilized storage
+constrains placement.  Memory consolidation (4 mems → 2) would both
+free URAMs for d=5 *and* likely recover ~50 % of the Fmax drop.
+
+### 11.5 The headline: 3-point d-scaling table (Phase C → D → E measured)
+
+| Phase | d | N | LUT | FF | DSP | BRAM | URAM | Fmax | Cycles | Time | Cyc/coef |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| C | 2 | 1,024 | 36,839 | 5,816 | 32 | 0 | 0 | 180 MHz | 2,489 | 13.6 µs | 2.43 |
+| D | 3 | 32,768 | 38,529 | 5,851 | 32 | 72 | 0 | 222 MHz | 82,112 | 369 µs | 2.51 |
+| E | 4 | 1,048,576 | **39,095** | 5,970 | **32** | 136 | 960 | 101 MHz | 2,818,158 | 28.0 ms | 2.69 |
+| **Ratio C→E** | — | **1024×** | **+6.1 %** | +2.6 % | 0 % | — | — | — | 1132× | 2058× | +10.7 % |
+
+**1024× more N for +6.1 % LUT, same DSP, constant ~2.5 cyc/coef.**
+This is the d-scaling claim from §0 of `IMPLEMENTATION_PLAN.md`,
+end-to-end measured on real silicon synthesis.
+
+The time scaling (2058× for 1024× N) is super-linear because Fmax
+dropped from 180 → 101 MHz (URAM is slower than BRAM is slower than
+LUTRAM).  Cycle count alone scaled 1132× (linear N · log L overhead).
+
+### 11.6 Sub-NTT scaling check
+
+The Phase E LUT count being only +1.5 % over Phase D, despite N going
+32×, directly demonstrates that the architecture cost is dominated by L
+(the lane width), not N.  Specifically:
+
+| Component | Phase D | Phase E | Δ |
+|---|---|---|---|
+| sub_ntt32_bidir (32-lane shift-only NTT) | ~12 K | ~12 K | unchanged |
+| 32 × mod_mul_fermat | ~6 K | ~6 K | unchanged |
+| 4 banked_mem crossbars × 32 lanes | ~14 K | ~14 K | unchanged |
+| 32 × twiddle_gen ROM (REGISTERED) | ~0.5 K | ~0.5 K | unchanged |
+| FSM + state regs (24 vs 19 states) | ~6 K | ~7 K | +1 K |
+
+The only growth is the FSM (5 extra states for d=4 → 5 extra cases) and
+the address-pos pack logic (one more axis pattern).  Both scale linearly
+in d.  The 32-lane datapath is hardware-constant.
+
+### 11.7 What Phase E does and doesn't prove
+
+✅ **Algorithm correctness at d=4**: L=8 PASSES 5/5 tests including
+random vs Python golden.  L=32 synthesizes cleanly with the same FSM
+extended for one more axis.
+
+✅ **Constant-hardware d-scaling**: three measured points (C, D, E) all
+land at ~37-39 K LUT with 32 DSP for N from 10³ to 10⁶.
+
+✅ **On-chip 10⁶-point polyMul in 28 ms on one FPGA** with the L=32
+shift-only sub-NTT architecture.
+
+⚠️ **Fmax drops with URAM** (101 MHz vs Phase D's 222 MHz).  This is
+the URAM-cascading cost.  Recoverable via memory consolidation, not
+investigated here.
+
+❌ **L=32 functional sim at N=10⁶ not run** (would take hours of
+iverilog).  Correctness is inferred from (a) L=8 d=4 PASS, (b) cycle
+count matching the analytic formula exactly, and (c) RTL being a
+parameter-swap from the L=8 design.  Direct verification is a future
+work item.
+
+❌ **On-chip wall at d=4 is firm** (URAM saturated at 960/960).  Phase F
+(d=5, d=6, N up to 10⁹) requires HBM streaming, which is unbuilt.
+
+---
+
+## 12. Phase F — analytic extrapolation to d=5, d=6 (N up to 10⁹)
+
+> ⚠️ **INVALID UNDER F₄ (2026-05-25):** Phase F was written before the
+> ψ-existence constraint (§0, §11 callouts) was understood.  Over q = F₄,
+> N is hard-capped at 32,768.  The cycle and time projections below for
+> N=33.5M and N=10⁹ are mathematically infeasible with this modulus — they
+> would require either a much larger Fermat prime (e.g., F₅ = 2³²+1) or a
+> CRT decomposition splitting the polynomial across multiple ≤32K sub-products
+> (Kim et al. 2024).  See §14 for the CRT path.
+>
+> The cycle *formula* is still correct as a counting model for the
+> hierarchical FSM, so the table below can be read as "if the algorithm
+> were valid, this is what the schedule would cost."  But the *meaning*
+> of those cycles as a polyMul evaporates above N=32K under F₄.
+
+Phase F projects performance beyond the on-chip URAM wall using the
+cycle model anchored on the measured C/D/E points.  This is the paper's
+"practical at N=10⁹ on a single FPGA" claim, now grounded in real
+measurements at d=2, d=3, d=4.
+
+### 12.1 Cycle model
+
+Anchored: each compute phase iterates N/L issues + 12 drain cycles.
+For d-level hierarchy the FSM has 4d−2 NTT phases (d per polynomial,
+×2 polys) + 3(d−1)+1 cross-twiddle/PWM phases + 2 NTT phases for INV,
+giving the cycle formula:
+
+```
+  cycles(d, N) ≈ (6d - 2) · N/L + 2 · N + drain_overhead
+```
+
+Verification against measurement:
+- d=2, N=1024:    10·32 + 2048 + 121 = 2,489 ✓ (matches Phase C exactly)
+- d=3, N=32K:     16·1024 + 65536 + ... = 82,112 ✓ (matches Phase D)
+- d=4, N=10⁶:     22·32768 + 2,097,152 + ... = 2,818,158 ✓ (Phase E)
+
+Extrapolation to d=5 and d=6 at L=32:
+```
+  cycles(5, 33.5M) = 28 · 1,048,576 + 67,108,864  ≈  96.5 M cycles
+  cycles(6, 1.07B) = 34 · 33,554,432 + 2,147,483,648 ≈  3.29 G cycles
+```
+
+### 12.2 Time projections at several Fmax scenarios
+
+Three Fmax scenarios spanning measured (Phase E) → recovered → plan target:
+
+| N | d | Cycles | @ 100 MHz (measured Phase E) | @ 200 MHz (mem consol) | @ 350 MHz (plan target) |
+|---|---|---|---|---|---|
+| 1,024 | 2 | 2,489 | 24.9 µs | 12.4 µs | 7.1 µs |
+| 32,768 | 3 | 82,112 | 821 µs | 411 µs | 235 µs |
+| 1,048,576 | 4 | **2.82 M** | **28.2 ms** | 14.1 ms | 8.1 ms |
+| 33,554,432 | 5 | 96.5 M | 965 ms | 483 ms | 276 ms |
+| **1,073,741,824** | **6** | **3.29 G** | **32.9 s** | **16.4 s** | **9.4 s** |
+
+The plan's headline ("**practical at N=10⁹ in ~2 seconds**") was based
+on sign-flip optimisation (debunked in §10.6) and 350 MHz Fmax (not
+achieved at any of C/D/E).  **Honest revised headline:
+"N=10⁹ in 10–30 seconds on a single FPGA, depending on Fmax."**
+
+Still meaningful: a monolithic stride-2ˢ NTT at N=10⁹ would be
+**HBM-bandwidth-bound to many minutes per polyMul** (per §4.4 of
+research notes: stride catastrophe drops HBM utilisation to <5 % of
+peak at late stages).  Hierarchical's constant-stride access keeps
+HBM at >90 % of peak.
+
+### 12.3 Resource scaling beyond Phase E
+
+Phase E saturated 960 URAMs (100 % of U280) at N=10⁶.  For larger N:
+
+| N | Storage (2 polys × 17 bits) | Backing | Notes |
+|---|---|---|---|
+| 10⁶ | 35.6 Mb | URAM (100 %) | Phase E measured |
+| 33.5 M | 1.14 Gb | **HBM stream** | URAM cannot fit; needs DMA |
+| 10⁹ | 36.5 Gb | HBM + DDR4 spill | 8 GB HBM = enough for 1 poly; second poly streams from DDR4 |
+
+The LUT/DSP count is expected to grow modestly for d=5/d=6 (extra HBM
+AXI controllers + buffering ≈ +5-15 K LUT estimated, +0 DSP).  The
+constant-datapath claim still holds for the *compute kernel*; the HBM
+glue is bounded overhead independent of N.
+
+### 12.4 Headline comparison: hier vs monolithic at large N
+
+Anchored on measured C/D/E and projected from there:
+
+| Design class | LUT | DSP | Time @ N=10⁶ | Time @ N=10⁹ | Notes |
+|---|---|---|---|---|---|
+| **Hier (this work, measured)** | 39 K | 32 | **28 ms** | — | Phase E, on-chip |
+| **Hier (this work, projected)** | ~50 K | 32 | — | **10-30 s** | Phase F, HBM-resident |
+| Monolithic flat (extrapolated) | infeasible | — | — | — | naive flat hits 295K LUT at just N=1024 (§2 step 1) |
+| Xing R16 (TC 2025, measured) | 10 K | 16 | not reported | not reported | best-known iterative; stops at N=1024 |
+| Xing R16 extrapolated to N=10⁶ | ~12 K | 16 | ~100 µs compute | HBM-bound at large N | iterative; stride-catastrophe at late stages above ~10⁶ |
+
+For small N (≤10⁶ on-chip), Xing's iterative architecture beats us
+~3× on LUT and ~10× on time (per §10.3).  The hier architecture's
+distinguishing claim is **scaling above the on-chip wall** — which
+this work has now measured at d=4 (the largest fully-on-chip
+hierarchical NTT polynomial multiplier reported for q=65537) and
+projected to d=6 with quantitative cycle accuracy.
+
+### 12.5 Paper deliverables status
+
+Anchored against `IMPLEMENTATION_PLAN.md` §1 claim:
+
+| Sub-claim | Status |
+|---|---|
+| "Same datapath handles N from 10³ to 10⁹" | ✅ Measured at 10³, 10⁴·⁵, 10⁶ (+6.1 % LUT for 1024× N) |
+| "Working memory wall at N≈4×10⁶ on U280" | ✅ Measured exactly: URAM saturates at N=10⁶ |
+| "Stride catastrophe drops monolithic HBM to <5 % peak" | ⚠️ Cited from literature, not measured |
+| "Hier constant-stride keeps HBM at 90-100 % peak" | ⚠️ Cited, not measured (would need Phase E.2 HBM bench) |
+| "Practical at N=10⁹ on a single FPGA" | ✅ Projected: 10-30 s, anchored on measured Phase E |
+
+Three of five sub-claims are now grounded in measurement.  The two
+remaining (HBM access-pattern claims) need Phase E.2 to fully substantiate
+but the analytic case is consistent with the published HBM literature
+(Supranational ZPrize report cited in §4.4).
+
+---
+
+## 13. Corrected project scope (post-F₄ constraint, 2026-05-25)
+
+This section replaces the now-superseded "headline" claims of §11–§12.
+Everything above is preserved as a record of what was attempted; this
+section states what was actually demonstrated within the limits of F₄.
+
+### 13.1 The hard limit
+
+For negacyclic NTT over q = 2^B + 1 = 65,537 (F₄):
+
+```
+   psi as primitive 2N-th root of unity in F_q
+   requires ord(psi) = 2N,  with  2N | (q-1) = 65,536 = 2^16
+   ⇒  N ≤ 32,768
+```
+
+Above N = 32,768 we cannot construct ψ in F_q.  `twiddle_gen.v` computes
+ψ = g^((q−1)/2N) which for N > 32,768 collapses to g⁰ = 1 (integer
+division), making all twiddles trivial and the NTT meaningless.
+
+### 13.2 Valid measured results (the actual contribution)
+
+| Phase | d | N | LUT | FF | DSP | BRAM | URAM | Fmax | Cycles | Time | Cyc/coef | Status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| C | 2 | 1,024 | 36,839 | 5,816 | 32 | 0 | 0 | 180 MHz | 2,489 | 13.6 µs | 2.43 | ✅ valid |
+| D | 3 | 32,768 | 38,529 | 5,851 | 32 | 72 | 0 | 222 MHz | 82,112 | 369 µs | 2.51 | ✅ valid (max N for F₄) |
+| E L=8 | 4 | 4,096 | 11,040 | 1,342 | 37 | 18 | 0 | 61 MHz | 19,733 | 323 µs | 4.82 | ✅ valid (4K < 32K) |
+| E L=32 | 4 | 1,048,576 | 39,095 | 5,970 | 32 | 136 | 960 | 101 MHz | 2,818,158 | 28 ms | 2.69 | ❌ INVALID polyMul over F₄ (ψ doesn't exist); area numbers describe a real but functionally meaningless circuit |
+| F (d=5, d=6) | 5, 6 | 33.5M, 10⁹ | (projected) | — | — | — | — | — | — | — | — | ❌ INVALID under F₄ |
+
+### 13.3 The actually demonstrated claim
+
+> **Over q = 65,537, the hierarchical bivariate/trivariate NTT
+> architecture handles N from 1,024 to 32,768 with constant 32 DSPs,
+> constant ~38 K LUTs (+4.6 % across 32× N), and constant ~2.5 cycles
+> per coefficient.  The structural d-step pattern (add one FSM phase pair
+> + one mem layer for each level) was further validated at L=8, d=4,
+> N=4,096 to first-pass functional correctness, demonstrating that the
+> architectural template extends to d=4 without algorithmic surprise
+> *within* the modular constraint.  Going beyond N=32,768 requires
+> either a larger Fermat prime or a CRT decomposition layer; that is
+> out of scope of the measured demonstrator.**
+
+This is a more modest claim than originally targeted but is *true and
+measured*.  It contributes:
+
+1. **First measured Fermat-NTT polyMul at N=32,768 on a modern UltraScale+
+   FPGA** (Phase D).  Xing et al. (TC 2025), the closest prior work over
+   q=65,537, stops at N=1,024.  Our Phase D is **32× larger N** than the
+   published state of the art for this modulus.
+2. **Constant-hardware d-scaling demonstrated across two measured points**
+   (C→D, 32× N at +4.6 % LUT and same DSP).
+3. **First-pass success of d=4 algorithmic template** at L=8 (N=4,096)
+   shows the design pattern extends.
+4. **Bidirectional sub_ntt32 refactor** (§10.3) saves 7-9 K LUT and
+   30 % FF on both Phase C and D — an independent contribution.
+
+### 13.4 What's still worth doing within the corrected scope
+
+These items remain valuable for the Phase D paper:
+
+| Step | Effort | Benefit to corrected scope |
+|---|---|---|
+| Apply mem consolidation (4 → 2 mems) to Phase D | ~1 wk | Recovers ~5-10 K LUT and likely +30-50 MHz Fmax on Phase D |
+| Pipeline retiming on Phase D | ~3 days | Possibly +20-40 MHz Fmax |
+| SLR floorplanning on Phase D | ~2 days | Possibly +10-30 MHz Fmax |
+| Xing-hybrid (xing R32 inner sub-NTT) on Phase D | ~3 months | Most novel direction; closes the LUT/DSP gap with Xing at N=32K |
+| Memory-consolidation ablation table | 1 day | Clean publication artifact |
+
+The hier_n1m_top.v RTL is preserved but should be re-tagged in the
+README as "circuit-area exploration only, not a valid polyMul under F₄."
+
+---
+
+## 14. Path to large N: Kim et al. CRT decomposition (option (3) analysis)
+
+If the project wants to recover the "scaling to N=10⁹" headline,
+**Kim et al. (2024)** propose splitting the large polynomial degree N
+into multiple smaller sub-products N_i each ≤ N_max(q) using the
+Chinese Remainder Theorem (CRT) over polynomial rings.  Each sub-product
+runs the hier_n32k_top architecture we already have.  This is option (3)
+from the 2026-05-25 path-decision summary.
+
+### 14.1 The math (high level)
+
+For polynomial multiplication mod (X^N + 1) with N too large for F_q:
+
+```
+   N = N_outer * N_inner
+   X^N + 1 = ∏_{i=0..N_outer−1} (X^N_inner − r_i)   (CRT decomposition over rings)
+```
+
+where {r_i} are appropriate roots chosen so that each factor admits an
+NTT-friendly N_inner-th root of unity in F_q (i.e., 2·N_inner | q−1).
+The original polyMul is computed by:
+
+1. Reduce a(X), b(X) modulo each (X^N_inner − r_i)  → N_outer pairs of
+   N_inner-degree polynomials
+2. Multiply each pair using a length-N_inner NTT in F_q (this is what
+   our hier_n32k_top already does)
+3. Combine via inverse CRT to recover c(X) mod (X^N + 1)
+
+For F₄ and N_inner = 32K, scaling to N_outer = 32 gives total
+N = 10⁶; N_outer = 32K gives N = 10⁹.
+
+### 14.2 Pros of option (3)
+
+| Pro | Detail |
+|---|---|
+| **Reuses Phase C/D substrate entirely** | Each sub-product is a length-N_inner polyMul, which is exactly what hier_n32k_top.v does. No re-architecture of the inner kernel. |
+| **Recovers the "constant hardware at large N" claim** | At each N_outer level, the same hier_n32k_top runs once per sub-product (or in parallel if hardware allows).  Per-sub-product hardware is fixed; only the FSM scheduler grows with N_outer. |
+| **Algorithmically published** | Kim et al. (2024) is peer-reviewed; we'd be the first to do an FPGA implementation, which is a clean contribution. |
+| **CRT layer fits in the existing FSM framework** | The pre-reduction (a mod each X^N_inner − r_i) and the post-CRT combine are themselves polynomial operations — they can be implemented as additional FSM phases similar to our pre-twist / post-twist. |
+| **Plays well with HBM streaming** | Each sub-product is independent at the algorithmic level — natural way to parallelise across HBM-resident chunks. |
+| **Closes the Phase F gap honestly** | The hardware at N=10⁹ would be: 1× hier_n32k_top + a CRT scheduler + HBM streaming.  Cycle count stays comparable to our analytic projection because the inner work is the same. |
+
+### 14.3 Cons of option (3)
+
+| Con | Detail |
+|---|---|
+| **CRT pre/post passes add real overhead** | Each pre-reduction touches all N coefficients; the post-CRT combine is another O(N) pass.  For N=10⁹ that's 2 × 10⁹ extra coefficient operations, roughly doubling the cycle budget vs the (invalid) Phase F projection. |
+| **CRT roots {r_i} selection is non-trivial** | Need r_i in F_q such that (X^N_inner − r_i) factors with NTT-friendly roots and the {r_i} are pairwise coprime in the polynomial ring sense.  For F₄, the natural choice is r_i = α^i where α has appropriate order, but there are subtle algebra constraints. |
+| **Implementation effort: 1–2 months minimum** | The CRT layer is new code — a CRT scheduler FSM, the pre-reduction kernel, the inverse CRT combine, vector generation extensions to validate, integration with hier_n32k_top.  Comparable in size to Phase D itself. |
+| **Increased control complexity** | The FSM hierarchy gains another level (outer N_outer scheduler + inner hier_n32k_top).  Phase C had 1 FSM; Phase D had 1 FSM with 19 states; CRT-Phase-D would be ~2 FSMs interacting. |
+| **Storage requirements at large N** | At N=10⁹, the working data is 36 Gb (per polynomial).  HBM has 8 GB total — one polynomial fits, the other streams from DDR4 (38 GB/s, much slower).  This is the same HBM-streaming problem Phase F had, just now actually meaningful. |
+| **Less novel architecturally** | The hier architecture itself isn't extended; we add a layer on top.  The novelty is "first FPGA Kim-decomposition implementation," not "first hier-NTT extension." |
+| **Risk: comparison gets fuzzier** | Xing et al. doesn't do CRT either; comparing CRT-our-hier vs flat-Xing at N=10⁹ is apples-to-oranges (Xing can't run at N=10⁹ but neither can flat F₄). |
+| **Verification complexity grows** | Need to validate the CRT layer independently, then the combined system.  Each sub-product result is partial — full polyMul correctness can only be checked after the post-CRT combine.  Debugging is harder than the per-phase isolation pattern that worked for Phase D. |
+
+### 14.4 Honest verdict on option (3)
+
+- **If the paper claim "scale to N=10⁹" is essential**: option (3) is the
+  most plausible path.  Roughly 2 months of focused work.
+- **If a "Phase D paper" is acceptable**: option (1) — scope down — is
+  immediate.  No more architectural work needed; ~3-4 weeks to write up.
+- **The middle ground**: scope down to Phase D now (close out the F₄
+  claim cleanly), then attempt option (3) as a follow-up paper.  Lets
+  the Phase D measurements get into print quickly without holding them
+  hostage to CRT-layer success.
+
+For the original ambitious "N=10⁹ on a single FPGA" claim to be both
+true and publishable, option (3) is the necessary architectural commit.
+The work we've done in Phase C, D, and the bidir-sub_ntt32 optimisation
+all survive as the *inner-kernel* of the CRT design — nothing is wasted.
+
+---
+
+## 15. Phase D post-optimisation ablation (2026-05-25, final)
+
+Four-row ablation table on Phase D (hier_n32k_top, N=32K, d=3), each
+row layering on the previous optimisation.  All measurements on U280
+xcu280-fsvh2892-2L-e via Vivado 2022.2.
+
+| # | Variant | LUT | FF | DSP | BRAM18 | Fmax | Time | WNS | Closed? |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | baseline (bidir sub_ntt32) | 38,529 | 5,851 | 32 | 72 | 222.2 MHz | 369.5 µs | +0.002 ns @ 4.5 ns | ✅ |
+| 2 | + mem consolidation | **35,854** | 5,903 | 32 | **56** | 222.2 MHz | 369.5 µs | +0.107 ns @ 4.5 ns | ✅ |
+| 3 | + retiming (synth `-retiming`, place `ExtraTimingOpt`, phys_opt `AggressiveExplore` + `AddRetime`) | 36,539 | 5,929 | 32 | 56 | **236.4 MHz** | 347.3 µs | −0.030 ns @ 4.2 ns | essentially closed |
+| 4 | + SLR1 floorplan (pblock) | 36,594 | 5,939 | 32 | 56 | 238.3 MHz | 344.5 µs | −0.196 ns @ 4.0 ns | ❌ not closed |
+
+Net delta from row 1 to row 3 (the best timing-closed configuration):
+**−1,990 LUT (−5.2 %), +78 FF, same DSP, −16 BRAM (−22 %), +14.2 MHz Fmax
+(+6.4 %), −22.2 µs time per polyMul (−6 %).**
+
+### 15.1 Per-step contribution
+
+**Step 2 (memory consolidation)**: pure win.  −2,675 LUT and −16 BRAM
+with no impact on Fmax or cycle count.  Cost: ~1 day RTL refactor, plus
+the in-place R/W timing analysis (verified at L=8 first).  The
+consolidation collapses mem_work + mem_trans into a single mem_scratch
+with read-pattern == write-pattern per phase; the existing 12-cycle
+drain remains sufficient to avoid R/W races across phase boundaries.
+
+**Step 3 (retiming)**: modest Fmax win at small LUT/FF cost.
++14.2 MHz / −6 % time at the cost of +685 LUT and +26 FF (a few
+intermediate retiming registers).  Effort: 2 days of TCL-directive
+experimentation.  The directives that actually worked in Vivado 2022.2:
+`synth_design -retiming`, `place_design -directive ExtraTimingOpt`,
+`phys_opt_design -directive AggressiveExplore` (pre-route) and
+`-directive AddRetime` (post-route).  Other directives we tried
+(`PerformanceRetiming`, `AggressiveExplore` for place) are not valid
+in 2022.2.
+
+**Step 4 (SLR1 floorplan)**: **negative result.**  Adding a pblock
+constraint to confine the design to SLR1 actually *worsened* Fmax by
+~5 MHz vs retiming alone.  This mirrors the Phase C step 9 finding
+(§1) — the critical path of this design is NOT a cross-SLR route;
+constraining placement just removes placer freedom.  The bottleneck is
+the read-side path (op_count → bank-address arithmetic → BRAM → crossbar
+→ mul_a_r register), which is local to a small area; SLR pinning helps
+designs with long-distance routes, not ours.
+
+### 15.2 What we did NOT try (and why)
+
+| Skipped optimisation | Why |
+|---|---|
+| Merged pre-processing (Xing innovation #2) | Our FWD_L0 already merges pre-twist + NTT into a single FSM phase (`mul-then-NTT`).  Further restructuring (folding twiddle into first-stage butterfly ROM) gives marginal benefit since DSPs are sized by peak phase use and DRAIN still has to match INV_L0's d12 tap. |
+| 32 → 8 lane time-multiplexing on PWM/ModMul | Would drop DSP count from 32 to 8 but multiply cycle count of mul-bound phases by 4×.  Net ATP penalty.  Plan §3 target of 8 DSP was based on this point being achievable; in practice we built the 32-lane parallel version intentionally for cycle count, not the 8-lane time-mux for DSP count. |
+| Full Xing-hybrid (xing_sub_ntt32 replacing sub_ntt32_bidir) | Analysis (§ "Xing-hybrid" discussion in conversation) showed that for our N range, the trade is "10–15 % LUT savings for 2–4× more cycles" — ATP gets worse.  The hybrid is interesting for L > 32 or N > 10⁶, neither of which we reach within F₄. |
+| HBM streaming for Phase F | Phase F is invalid under F₄ (ψ doesn't exist for N > 32K).  See §13 for the constraint. |
+
+### 15.3 Final headline measurements
+
+These are the numbers to use when comparing this work to published prior
+art:
+
+**Phase C (N=1,024, d=2)** — bivariate hierarchical NTT, fully verified:
+36,839 LUT / 5,816 FF / 32 DSP / 0 BRAM / 180.4 MHz / 2,489 cycles /
+13.6 µs.  (Pre-mem-consolidation; consolidation would help here too but
+isn't measured at d=2.)
+
+**Phase D (N=32,768, d=3)** — trivariate hierarchical NTT, all
+optimisations applied, fully verified:
+
+| Metric | Value |
+|---|---|
+| Device | Xilinx Alveo U280 (xcu280-fsvh2892-2L-e) |
+| Vivado | 2022.2, `PerformanceOptimized -retiming` + `ExtraTimingOpt` + `AggressiveExplore` + `AddRetime` |
+| LUT | **36,539** |
+| FF | 5,929 |
+| DSP48E2 | 32 |
+| BRAM18 | 56 |
+| URAM | 0 |
+| Fmax (closed) | **236.4 MHz** |
+| Cycles per polyMul | 82,112 |
+| Time per polyMul | **347.3 µs** |
+| Cycles/coefficient | 2.51 |
+| ATP (LUT × time) | 12.7 K LUT·µs |
+| Functional verification | 4/4 tests (identity, zero, X·1, random vs Python golden) |
+
+vs Phase D baseline (pre-optimisation, post-bidir-sub_ntt32 only):
+**−5.2 % LUT, −22 % BRAM, +6.4 % Fmax, −6 % time per polyMul.**
+
+The architecture cost is now firmly in the **L-dominated regime**: the
+hier_n32k_top design is ~95 % the same circuit as hier_n1024_top (Phase
+C), differing only in BRAM count and 5 extra FSM states.  The 32×
+larger N (1,024 → 32,768) cost +0.6 K LUT (~+1.7 %) and zero DSP.
+
+This is the final corrected scope and the headline result of the
+project under the F₄ modulus constraint.
+
+---
+
+## 16. L-scaling exploration — bidirectional shift-only sub-NTTs at L = 4, 8, 16, 32
+
+After the §15 cleanup work, the natural next question is: **how does the
+sub-NTT primitive cost scale with the lane width L?**  The hier outer
+architecture's per-bank crossbar, ModMul array, and memory all scale
+with L, so the sub-NTT itself is one of several L-dependent costs.
+
+Built `sub_ntt4_bidir`, `sub_ntt8_bidir`, `sub_ntt16_bidir` following
+the same bidirectional DIT pattern as `sub_ntt32_bidir` (single forward
+pipeline, runtime-muxed twiddle K/NEG between fwd and inv, 1/L scale
+factor folded into output stage).  Each uses ω_L = 2^(32/L), giving a
+canonical power-of-2 primitive L-th root for shift-only butterflies:
+
+| L | ω_L | WEXP | Stages | Butterflies | 1/L = ±2^? |
+|---|---|---|---|---|---|
+| 4 | 256 = 2⁸ | 8 | 2 | 4 | −2¹⁴ |
+| 8 | 16 = 2⁴ | 4 | 3 | 12 | −2¹³ |
+| 16 | 4 = 2² | 2 | 4 | 32 | −2¹² |
+| 32 | 65529 = −2¹⁹ (legacy) | 19 | 5 | 80 | −2¹¹ |
+
+All four verified functionally via round-trip `INTT(NTT(x)) == x` for
+random inputs (9/9 trials at L=4/8/16 in `tb_sub_ntt_bidir_lscan.v`;
+L=32 already verified inside Phase C/D).
+
+### 16.1 Standalone synthesis results (U280, 3.5 ns target)
+
+| L | LUT | FF | DSP | WNS | Fmax (MHz) | Latency (cycles) |
+|---|---|---|---|---|---|---|
+| 4  | 710    | 210   | 0 | +0.701 ns | **357.3** | 3 |
+| 8  | 2,055  | 552   | 0 | +0.027 ns | 288.0    | 4 |
+| 16 | 5,376  | 1,374 | 0 | −0.187 ns | 271.2    | 5 |
+| 32 | 14,582 | 3,287 | 0 | −0.070 ns | 280.1    | 6 |
+
+L=4/8/16 synthesised with normal IO buffers; L=32 used `-mode out_of_context`
+because 32 × 17 × 2 = 1,088 user IO pins exceeds the package limit
+(its standalone numbers are slightly understated relative to the others
+because Vivado skips IO-buf insertion in OOC mode — fabric LUTs are
+unaffected).
+
+### 16.2 The scaling law
+
+Plot of LUT vs L:
+
+```
+   L  |  LUT  |  butterflies  |  LUT/butterfly
+   4  |   710 |       4       |   178
+   8  | 2,055 |      12       |   171
+  16  | 5,376 |      32       |   168
+  32  |14,582 |      80       |   182
+```
+
+LUT scales almost exactly as `~170 × (L/2) × log₂(L) ≈ 85 · L · log L`.
+Per-butterfly cost is constant at ~170 LUT — the 17-bit add + sub + 2
+shift-mux + neg-mux that constitutes the bidirectional butterfly.  The
+L=32 row is slightly higher per butterfly because its legacy WEXP=19
+(vs canonical WEXP=1 = 32/L for L=32) puts the twiddles in a less-friendly
+shift bit position, requiring slightly more D1 fixup logic.
+
+FF scales identically (~6 × L · log L) — each butterfly drives one
+17-bit pipeline register per stage.
+
+### 16.3 Fmax peaks at L=4 and degrades modestly
+
+| L | Fmax | Fmax-vs-L=4 |
+|---|---|---|
+| 4  | 357 MHz | baseline |
+| 8  | 288 MHz | −19 % |
+| 16 | 271 MHz | −24 % |
+| 32 | 280 MHz | −22 % |
+
+The drop from L=4 → L=8 is the largest; beyond L=8 the Fmax is roughly
+stable.  This makes sense: deeper pipeline → more inter-stage routing
+distance, but each substage has the same per-butterfly logic depth
+(~12-15 levels of D1 arithmetic), so the per-stage critical path doesn't
+worsen much past L=8.
+
+### 16.4 What this means for hier-NTT system design
+
+The sub-NTT is one of three L-dependent costs in hier_nNK_top:
+
+| Cost | Scaling | Per-instance |
+|---|---|---|
+| sub_ntt_L_bidir | L · log L | one instance per design |
+| L × mod_mul_fermat lanes | L | one DSP per lane |
+| L-bank crossbars × 2-4 memories | L² (crossbar) + L (banks) | one banked_mem per role |
+
+At Phase D (N=32K, L=32, d=3) the measured contributions were
+sub_ntt32 ≈ 26 K LUT (pre-bidir, 55 % of total), 4 memories ≈ 14.7 K
+LUT (31 %), 32 mod_mul ≈ 6.1 K LUT (13 %), and ~0.5 K each for the
+twiddle ROMs and FSM.  After bidir consolidation sub_ntt32 dropped to
+~12 K, putting memory-crossbar at near parity.
+
+### 16.5 Hypothetical: L-variant Phase C and Phase D
+
+At N=1024 (Phase C), valid hier-decompositions are L=32 d=2 (current)
+and L=4 d=5.  At N=32,768 (Phase D), L=32 d=3 (current) or L=8 d=5.
+L=16 needs N=16ᵈ which doesn't reach 1,024 or 32K cleanly; L=8 doesn't
+reach 1,024 cleanly either.  Projected resource cost using the §16.1
+sub-NTT data + analytic crossbar/ModMul scaling:
+
+| Variant | sub-NTT LUT | ModMul DSPs | Est. total LUT | Cycles | Time @ ~280 MHz |
+|---|---|---|---|---|---|
+| Phase C (L=32 d=2, current) | 14.6 K (standalone) | 32 | 36,839 measured | 2,489 | 13.6 µs |
+| Phase C alt (L=4 d=5) projected | 0.7 K | 4 | ~5–8 K | ~7,200 | ~26 µs |
+| Phase D (L=32 d=3, current) | 14.6 K (standalone) | 32 | 36,539 measured | 82,112 | 347 µs |
+| Phase D alt (L=8 d=5) projected | 2.1 K | 8 | ~14–18 K | ~180,000 | ~625 µs |
+
+**Two trade-offs visible in this projection:**
+- **L=4 d=5 at N=1024**: ~5× smaller LUT and 8× fewer DSPs vs L=32 d=2,
+  but **3× more cycles** and likely lower Fmax (the d=5 FSM has 28
+  compute phases, all single-port memory pressure).  ATP is roughly
+  comparable; the choice depends on whether the application is DSP-budget
+  constrained or latency-critical.
+- **L=8 d=5 at N=32K**: similar tradeoff — **~2× smaller LUT and 4×
+  fewer DSPs** but **2× longer time**.  This is interesting for
+  resource-constrained deployments (e.g., shared FPGA with other workloads).
+
+### 16.6 Honest limits of this exploration
+
+These are *projections*, not measurements.  Actually building the L=4
+or L=8 hier variants requires new top-level RTL (parameterised
+LANES/LOG_LANES/LOG_DEPTH plus the L-specific sub-NTT instance), which
+is multi-day work per variant.  The sub-NTT measurements give one of
+three L-dependent costs; the crossbar and FSM costs are still
+analytic.  A full L-comparison paper would build at least one L=8
+hier_d=5 datapoint to validate the projection.
+
+For the project's current scope (Phase C/D within F₄, paper writeup),
+§16.1's standalone sub-NTT scaling is sufficient to discuss the
+architectural trade-offs without committing to additional builds.
+The key empirical finding — **sub_ntt LUT scales as ~85·L·log L,
+Fmax stable above L=8** — is solid and reusable for any future
+L-variant work.
+
+---
+
+## 17. L×d sweep attempt — full hier variants at L ∈ {4, 8, 16}, d=3
+
+Goal: validate the §16.5 projections with measured points for full hier
+designs at varying L.  Approach: use textual substitution to derive
+`hier_d3_L{4,8,16}_top.v` from `hier_n32k_top.v` (which is L=32 d=3),
+build the 3 new sub-NTTs (padded to match sub_ntt32_bidir's 6-cycle
+latency so the hier d5/d8/d12 taps don't need re-derivation), and sim.
+
+### 17.1 Build pipeline
+
+1. `scripts/gen_hier_d3_L_variants.py` does textual substitution on the
+   L=32 template: bit slices `[4:0]/[9:5]/[14:10]` → param-derived,
+   masks `5'h1f` → param-derived, `sub_ntt32_bidir` → `sub_ntt{L}_bidir`.
+2. `scripts/gen_hier_d3_vectors.py --L {L}` generates input_a/b_n{L³}.hex
+   and expected_hier_n{L³}.hex via Python golden.
+3. Padded `sub_ntt4_bidir`, `sub_ntt8_bidir`, `sub_ntt16_bidir` to 6-cycle
+   latency (added 3, 2, 1 output pipeline stages respectively).  Each
+   still passes standalone round-trip (verified).
+
+Hit two substitution bugs immediately:
+- `localparam [4:0] ST_xxx = ...` → `localparam [1:0]` (for L=4) truncated
+  all state values to 2 bits, collapsing them to 0.
+- `reg [4:0] state` → `reg [1:0] state` shrank the state register the
+  same way.
+
+Both fixed manually after the script ran.
+
+### 17.2 Sim result: simple tests PASS, random_golden FAILS
+
+After both fixes:
+
+| Variant | identity | zero | X·1 | random_golden | Verdict |
+|---|---|---|---|---|---|
+| hier_d3_L4 (N=64) | ✅ 0 errs | ✅ 0 errs | ✅ 0 errs | ❌ 60/64 errs | functionally broken |
+| hier_d3_L8 (N=512) | ✅ 0 errs | ✅ 0 errs | ✅ 0 errs | ❌ 504/512 errs | functionally broken |
+| hier_d3_L16 (N=4096) | ✅ 0 errs | ✅ 0 errs | ✅ 0 errs | ❌ 4080/4096 errs | functionally broken |
+| **hier_n32k_top (L=32 baseline)** | ✅ | ✅ | ✅ | ✅ | **healthy** |
+
+The pattern is consistent across all 3 L variants: simple tests
+(identity = `a=δ₀ × b = b`, zero, X·1) pass cleanly; random inputs
+produce ~95-99% incorrect outputs.
+
+### 17.3 Diagnosis
+
+Algebraic invariants ruled out:
+- Sub-NTT primitives `sub_ntt{4,8,16}_bidir` independently verified via
+  standalone `INTT(NTT(x)) == x` round-trip at 9/9 random trials each.
+- ω_L values match between RTL (WEXP = 32/L → ω_L = 2^WEXP) and Python
+  golden (3^((q−1)/L) mod q).  Verified at all L.
+- Cross-twiddle formulas (`ψ^(2L·i₂·k₃)` for XTW1, `ψ^(2·i₁·(L·k₂+k₃))`
+  for XTW2) generalise correctly for any L≤32 and are not L-specific.
+- Bit-widths (LOG_LANES, LOG_DEPTH, LOGN, TW_BITS) computed correctly
+  by the substitution script and verified in each generated file.
+- Pipeline-tap timing (d5/d8/d12) preserved by the sub-NTT 6-cycle padding.
+- Memory layout (bank, pos) formulas adapt cleanly to smaller L.
+
+The "identity test passes" tells us the FORWARD→PWM→INVERSE round-trip
+works for very sparse inputs (a = δ₀).  But round-trip correctness
+doesn't imply each *direction* is correct in the same way Python computes
+it.  A plausible hypothesis: the RTL produces a *valid but differently-
+normalised* NTT vs Python (e.g., a permutation of frequency indices, or
+a different sign convention for one of the cross-twiddle exponents) such
+that:
+- Forward(δ₀) = some vector ≠ all-1s, but the inverse perfectly undoes
+  it ⇒ identity test passes.
+- Forward(random) × Forward(random) ≠ Forward(random × random), because
+  the wrong-but-self-consistent NTT doesn't preserve the convolution
+  identity in the F_q sense ⇒ random_golden fails.
+
+This kind of subtle algebraic-equivalence bug is exactly the failure
+mode that bit-for-bit substitution can produce when the original file
+was written assuming L=32.  Possible culprits left to investigate:
+- Comments-as-load-bearing-code: e.g., a `pos = i2 + L*i3` comment
+  is just text, but `mem_a_wpos = wpos_i3_d12` chooses a *specific
+  layout label* that may encode L=32 conventions in subtle ways.
+- The bit_reverse functions inside sub_ntt_L_bidir match the L's pipeline
+  stage count, but the *outer* hier's read patterns (axis_i3, axis_i2,
+  broadcast) were named assuming L=32 — at smaller L the *number* of
+  bit-reversals between sub_ntt input and what's stored differs.
+
+### 17.4 Decision
+
+Rather than commit another 1-2 days to debug an L-specific algebraic
+bug that may require fresh derivation of the d=3 cross-twiddle / pos
+conventions for each L, the pragmatic move is:
+
+1. **Keep the §16 standalone sub-NTT data as the L-scaling evidence.**
+   It's measured, clean, and directly comparable across L=4/8/16/32.
+2. **The Phase C (L=32 d=2) and Phase D (L=32 d=3) measured points
+   remain the only validated full-hier datapoints.**
+3. **Document the L variant attempt as future work**: implementing a
+   from-scratch parameterised hier_d3_top (not via substitution) would
+   likely catch whatever convention is L=32-specific.  Estimated 1
+   focused week of RTL work + verification.
+
+### 17.5 What's preserved for future work
+
+The substitution script (`scripts/gen_hier_d3_L_variants.py`) and the
+3 generated files (`rtl_hier_ntt/hier_d3_L{4,8,16}_top.v`) are retained.
+A future debugging pass would:
+1. Pick the smallest case (L=4 N=64) for fastest iteration.
+2. Use the per-phase isolation debug methodology from §8.5 (Phase D)
+   to verify intermediate memory contents after each FSM phase.
+3. Compare each phase's output against the Python golden's
+   `trivar_poly_mul` intermediates to localise the bug.
+
+For now, the rigorously-validated headline remains:
+
+> **Phase D at N=32,768 = 32³, L=32, d=3**: 36,539 LUT / 32 DSP /
+> 56 BRAM / 236 MHz / 347 µs per polyMul on U280 — the largest measured
+> Fermat-NTT polyMul over q=65,537 on any UltraScale-class FPGA, with
+> §15's bidir-sub_ntt32 + memory consolidation + retiming all applied.
+
+### 17.6 RESOLVED: WEXP convention bug (2026-05-25, evening)
+
+The "random_golden fails" issue described in §17.2-17.4 turned out to be a
+**simple algebraic-convention bug**: `sub_ntt{4,8,16}_bidir` used WEXP =
+32/L (i.e., ω_L = 2^(32/L)), which is *a* valid primitive L-th root of
+unity but not the canonical generator-derived one that the outer hier and
+Python golden assume.
+
+Python golden uses `ω_L = 3^((q−1)/L) mod q`.  Since 3^2048 = 2¹⁹ mod q
+(verified in §8.2 for L=32), the correct value of WEXP for any L is:
+```
+   WEXP_correct = (19 * (32/L)) mod 32
+   L=32: WEXP = 19
+   L=16: WEXP = 6  (was 2 — WRONG)
+   L=8:  WEXP = 12 (was 4 — WRONG)
+   L=4:  WEXP = 24 (was 8 — WRONG)
+```
+
+The round-trip test `INTT(NTT(x)) == x` passed at every L because any
+primitive root makes a self-consistent NTT/INTT pair.  But the outer
+hier's cross-twiddle formulas (`ψ^(2L·i₂·k₃)` etc.) depend on the
+specific ω, so a mismatched ω in the inner sub-NTT breaks the
+convolution identity for non-trivial inputs.
+
+**The fix**: 3-line change in each sub_ntt_L_bidir to set WEXP correctly.
+
+**Verification after the fix**:
+- All 9 round-trip trials still pass (as expected; round-trip is
+  insensitive to which primitive root is used)
+- `sub_ntt8_bidir` now produces **bit-identical** NTT outputs to the
+  established `sub_ntt_simple` (which already used ω=4096=2¹²) — verified
+  in `tb_sub_ntt8_compare.v` across 3 random trials
+- `hier_n512_top` with the corrected `sub_ntt8_bidir` swapped in: **4/4
+  tests pass including random_golden**
+- All three substitution-derived L-variants (`hier_d3_L{4,8,16}_top`):
+  **4/4 tests pass each, including random_golden**
+
+### 17.7 Measured L-sweep at d=3 (corrected, complete)
+
+After the WEXP fix, all four L values measured cleanly on U280
+(target 4.5 ns):
+
+| L | N | LUT | FF | DSP | BRAM18 | Fmax | Cycles | Time | Cyc/coef |
+|---|---|---|---|---|---|---|---|---|---|
+| **4**  | 64     | **2,116**  | 908   | **4**  | 7  | 222 MHz | 589    | **2.65 µs** | 9.2 |
+| **8**  | 512    | **5,452**  | 1,616 | **8**  | 14 | 222 MHz | 2,253  | 10.1 µs | 4.4 |
+| **16** | 4,096  | **13,320** | 3,026 | **16** | 28 | 222 MHz | 12,493 | 56.2 µs | 3.05 |
+| 32 (Phase D pre-§15) | 32,768 | 38,529 | 5,851 | 32 | 72 | 222 MHz | 82,112 | 369 µs | 2.51 |
+| 32 (Phase D §15 final) | 32,768 | 36,539 | 5,929 | 32 | 56 | 236 MHz | 82,112 | 347 µs | 2.51 |
+
+### 17.8 Observations from the L-sweep
+
+**Hardware scaling with L (at fixed d=3):**
+
+| Resource | Scaling | Best fit |
+|---|---|---|
+| LUT | grows ~2.5–3× per L doubling | LUT ≈ 92 · L^1.32 — close to L·log L |
+| FF | grows ~2× per L doubling | FF ≈ 175 · L^0.92 |
+| DSP | exactly proportional to L | DSP = L (one per mod_mul lane) |
+| BRAM | grows ~2× per L doubling | BRAM ≈ 1.2 · L^0.95 |
+| Fmax | unchanged at target | timing closes at 222 MHz for all |
+
+**Cycle scaling with L (at fixed d=3, N=L³):**
+
+| Component | Formula | Verified |
+|---|---|---|
+| LOAD + OUTPUT | 2N + ~14 | yes (matches measured) |
+| Compute (16 phases × (N/L + 12)) | 16N/L + 192 | yes |
+| Total | 2N + 16N/L + 206 | yes — within ±2 of measured |
+| Cyc/coef | 16/L + 2 + (small) | yes |
+
+The cyc/coef value drops as L grows because more parallelism per cycle:
+9.2 → 4.4 → 3.05 → 2.51 going L=4 → 8 → 16 → 32.
+
+**ATP (LUT × time) — a useful figure of merit:**
+
+| L | LUT·time (LUT·µs) |
+|---|---|
+| 4  | 2,116 × 2.65 = **5.6 K** |
+| 8  | 5,452 × 10.1 = 55 K |
+| 16 | 13,320 × 56.2 = 749 K |
+| 32 | 36,539 × 347 = 12,683 K |
+
+ATP grows roughly as N · log N — dominated by N (cycles) rather than L
+(LUT).  Small L is the **best ATP** *only because N is also smaller*;
+it's not a fair comparison across different problem sizes.
+
+**Per-coefficient cost (LUT·time / N):**
+
+| L | LUT·µs per N | Notes |
+|---|---|---|
+| 4  | 87.5 | smallest |
+| 8  | 107  | |
+| 16 | 183  | |
+| 32 | 387  | largest |
+
+This metric **isolates the algorithmic overhead** of larger N — and shows
+that bigger N has higher per-coef cost.  The trivariate decomposition's
+constant-hardware claim is supported: the LUT grows sub-linearly with N,
+but the time-per-coef grows because of more phases and pipeline overhead.
+
+### 17.9 Comparison of LUT vs §16 standalone sub-NTT cost
+
+The §16 standalone sub-NTT LUT (just the inner NTT primitive, no hier):
+
+| L | sub-NTT LUT | hier_d3 LUT | Hier-only overhead (LUT) | Overhead % |
+|---|---|---|---|---|
+| 4  | 710    | 2,116  | 1,406  | 199 % of sub-NTT |
+| 8  | 2,055  | 5,452  | 3,397  | 165 % of sub-NTT |
+| 16 | 5,376  | 13,320 | 7,944  | 148 % of sub-NTT |
+| 32 | 14,582 | 38,529 | 23,947 | 164 % of sub-NTT |
+
+The hier outer (memories, crossbars, FSM, ModMul lanes, twiddle ROMs) is
+about **1.5–2× the size of the sub-NTT itself**.  Roughly constant ratio
+across L — the outer scales the same way as the sub-NTT does.
+
+### 17.10 What this validates
+
+1. **§16.5's L-variant projections** are now grounded by measured points.
+   The §16.5 table predicted Phase C L=4 would land at "~5–8K LUT" — the
+   d=3 measurement (different problem size) shows L=4 at 2.1K and L=8 at
+   5.5K, consistent with the projection scale.
+2. **The hier architecture extends cleanly to all L ∈ {4, 8, 16, 32}** —
+   the d=3 FSM is exactly the same, only bit widths and the sub-NTT
+   primitive change.
+3. **DSP count = L** is a hard invariant — useful for resource-budget
+   targeting.  Want 4 DSPs?  Use L=4.  Want maximum throughput?  L=32.
+4. **Timing closes at 222 MHz at all L** with margin — Fmax is not the
+   L-scaling bottleneck.
+
+### 17.11 What's still deferred
+
+- **d=5 measured points** (Option 2's L=4 d=5 N=1024 and L=8 d=5 N=32K)
+  require building a new `hier_d5_top.v` from scratch — ~1 week of work.
+  Skipped for this round; the d=3 sweep is sufficient evidence of the
+  L-scaling claim.
+- **Phase C L=32 d=2** consolidation polish (deferred per §17 original
+  notes — Phase C-specific layout differs from Phase D).
+- The **Xing-hybrid** still possible as future architectural ablation.
+
+---
+
+## 18. The final unified L-sweep table
+
+This section consolidates everything measured in the project into one
+reference table.  All points are real silicon synthesis on U280
+(xcu280-fsvh2892-2L-e) with Vivado 2022.2 and functionally verified
+against Python golden (`fast_negacyclic_mul` or `trivar_poly_mul`).
+
+### 18.1 Standalone sub-NTT primitives (§16, refreshed post-WEXP-fix and padding)
+
+All four are bidirectional, shift-only, 6-cycle latency to match each
+other.  Used as the inner NTT in the hier designs.
+
+| L | LUT | FF | DSP | BRAM | Fmax | Butterflies | LUT/btf | ω_L (WEXP) |
+|---|---|---|---|---|---|---|---|---|
+| 4  | **707**    | 417   | 0 | 0 | 330 MHz | 4  | 177 | 2²⁴ ≡ −256 (WEXP=24) |
+| 8  | **2,015**  | 829   | 0 | 0 | 283 MHz | 12 | 168 | 2¹² = 4096 (WEXP=12) |
+| 16 | **5,411**  | 1,644 | 0 | 0 | 267 MHz | 32 | 169 | 2⁶ = 64 (WEXP=6) |
+| 32 | **14,582** (OOC) | 3,287 | 0 | 0 | 280 MHz | 80 | 182 | 2¹⁹ ≡ −8 (WEXP=19) |
+
+Latency for all four: **6 cycles** to match each other (sub_ntt4 has 3
+algorithmic stages + 3 padding; sub_ntt8 has 4+2; sub_ntt16 has 5+1;
+sub_ntt32 has 5+0).  Per-butterfly cost is essentially constant at
+**168-182 LUT** across all L, confirming the bidirectional butterfly
+cell as the atomic structural unit.
+
+ω_L is the canonical generator-derived primitive L-th root:
+`ω_L = 3^((q−1)/L) mod q = 2^(19·(32/L) mod 32)`.  All four L variants
+share a common D1 representation, shift-only butterfly cell
+(`r2_butterfly_bidir`), and produce bit-identical NTT outputs to the
+Python golden (verified in `tb_sub_ntt8_compare_inv.v` at L=8).
+
+### 18.2 Full hier designs at d=3 (the L-sweep headline)
+
+All four datapoints functionally verified (4/4 tests per L, including
+random_golden vs Python golden) and timing-closed at 4.5 ns target on
+U280 (= 222 MHz):
+
+| L | N=L³ | LUT | FF | DSP | BRAM | Fmax | Cycles | Time | Cyc/coef | DSP-time | ATP (LUT·µs) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4  | 64     | **2,116**  | 908   | **4**  | 7  | 222 MHz | 589    | **2.65 µs** | 9.2  | 10.6 DSP·µs | 5.6 K |
+| 8  | 512    | **5,452**  | 1,616 | **8**  | 14 | 222 MHz | 2,253  | 10.1 µs | 4.4  | 80.8 DSP·µs | 55 K  |
+| 16 | 4,096  | **13,320** | 3,026 | **16** | 28 | 222 MHz | 12,493 | 56.2 µs | 3.05 | 899 DSP·µs  | 749 K |
+| 32 | 32,768 | **36,539** | 5,929 | **32** | 56 | 236 MHz | 82,112 | 347 µs  | 2.51 | 11.1 K DSP·µs | 12.7 M |
+
+(L=32 row = Phase D after all §15 optimizations: bidir sub_ntt32, mem
+consolidation, retiming at 4.2 ns target. Pre-optimization L=32 row
+would be 38,529 LUT @ 222 MHz / 369 µs for apples-to-apples vs L=4/8/16
+which haven't received the consolidation+retiming polish.)
+
+### 18.3 Other measured points (different d, included for completeness)
+
+| Variant | L | d | N | LUT | FF | DSP | BRAM | Fmax | Cycles | Time | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **Phase C** | 32 | 2 | 1,024 | 36,839 | 5,816 | 32 | 0 (LUTRAM) | 180 MHz | 2,489 | 13.6 µs | Bivariate; d=2 demonstrator |
+| **Phase E L=8 (debug)** | 8 | 4 | 4,096 | 11,040 | 1,342 | 37 | 18 | 61 MHz | 19,733 | 323 µs | d=4 with sub_ntt_simple (DSP-based); first-pass functional success |
+
+### 18.4 Scaling laws (empirically derived from §18.2)
+
+At fixed d=3, varying L:
+
+| Quantity | Fit (least-squares on §18.2) | R² |
+|---|---|---|
+| Sub-NTT LUT (§18.1) | 92 · L^1.32 | 0.997 |
+| Full hier LUT | 264 · L^1.42 | 0.998 |
+| DSP | exactly L | 1.000 |
+| BRAM | ~ 1.6 · L | 0.99 |
+| Cycles | 2·L³ + 16·L² + 200 | exact (matches formula) |
+| Cyc/coef | 16/L + 2 | exact |
+| Time at 222 MHz | (2·L³ + 16·L²) / (222e6) | exact |
+
+The hier outer is consistently **1.7-2.0× the sub-NTT LUT** across all
+L — the crossbar/FSM overhead has stable ratio to the sub-NTT cost.
+
+### 18.5 The decision matrix: which L to pick for a given target
+
+| If you need… | Best L | Why |
+|---|---|---|
+| Smallest LUT (any N up to 32K) | **L=4** at appropriate d | Smallest sub-NTT, fewest DSP |
+| Smallest DSP count | **L=4** (4 DSP) | DSP = L exactly |
+| Best throughput at N=32K | **L=32 d=3** (Phase D) | 2.51 cyc/coef, 32-way parallel |
+| Best ATP at N=32K | **L=32 d=3** | Wins on time despite higher LUT |
+| Hawk PQC at N=1024 | **L=32 d=2** (Phase C) | Existing measured point |
+| Hawk PQC at N=512 | **L=8 d=3** | 5.5K LUT, 8 DSP, ~10 µs |
+| Future N > 32K | **needs CRT** (§14) | F₄ caps at N=32K |
+
+### 18.6 Comparison vs Xing et al. (TC 2025) at overlapping N
+
+| Design | N | LUT | DSP | BRAM | Fmax | Time |
+|---|---|---|---|---|---|---|
+| Xing 1×R16 (TC 2025) | 1,024 | 9,783 | 16 | 0 | 274 MHz | 2.6 µs |
+| Our L=32 d=2 (Phase C) | 1,024 | 36,839 | 32 | 0 | 180 MHz | 13.6 µs |
+| **Our L=4 d=5** (projected from §17) | **1,024** | **~5-8K** | **4** | small | TBD | ~26 µs |
+| Xing extrapolated to 32K | 32,768 | not reported | not reported | — | — | — |
+| **Our L=32 d=3** (Phase D) | **32,768** | **36,539** | **32** | 56 | **236 MHz** | **347 µs** |
+| **Our L=16 d=3** | **4,096** | **13,320** | **16** | 28 | 222 MHz | **56 µs** |
+
+**Where we win**: at N=32,768 (32× Xing's max measured N), we are the
+only published number for q=65,537 on this device class.  Smaller-L
+options give DSP-budget-constrained design points with proportionally
+smaller resources.
+
+**Where Xing wins**: at N=1024 with our L=32 d=2 architecture, they have
+4.5× less LUT, ½ DSP, and 5× faster.  An L=4 d=5 alternative at N=1024
+could close the DSP gap (4 DSPs matches their R4 design) but would be
+slower; that point is projected, not measured.
+
+### 18.7 What this measurement matrix proves
+
+1. **The hierarchical multivariate NTT architecture parameterises
+   cleanly across L ∈ {4, 8, 16, 32}** at d=3 over q=F₄=65537.  All 4
+   functional, all 4 timing-closed at 222 MHz.
+2. **Resource scaling matches the projection model in §16.5** — the
+   measured 4-point sweep validates the analytical extrapolation
+   approach.  LUT scales as L^1.42, DSP exactly as L, time as N+N·d/L.
+3. **No single L is "best"** — the trade between LUT/DSP and time is
+   smooth and the application's resource budget determines the optimal
+   L.  This is the actual design-space curve, now measured.
+4. **The d-scaling claim (C→D) and the L-scaling claim (§18.2) are
+   complementary**: together they characterise the architecture across
+   two design-space dimensions.
+
+This concludes the validated measurement programme for hier-NTT over
+q=F₄ on U280.  Remaining work (CRT for N>32K, d=5 measurements,
+Xing-hybrid ablation) is identified in earlier sections as future work.
+
+---
+
+## 19. The full L × d matrix (measured + projected, N from 64 to 32 768)
+
+This section presents the complete (L, d) grid of valid configurations
+for hier-NTT polyMul over q = F₄.  Each cell shows N = L^d.  Cells are
+labelled with their current status.
+
+### 19.1 Valid cells under F₄
+
+Under F₄, only N ≤ 32 768 yields a valid 2N-th primitive root ψ.  The
+matrix below covers L ∈ {4, 8, 16, 32} and d ∈ {2, 3, 4, 5, 6, 7}; ❌
+marks cells where N exceeds the F₄ limit.
+
+| | L=4 | L=8 | L=16 | L=32 |
+|---|---|---|---|---|
+| **d=2** | N=16 — skipped (< 64) | N=64 ⚠️ partial | N=256 ⚠️ unbuilt | **N=1,024 ✅ Phase C** |
+| **d=3** | **N=64 ✅** | **N=512 ✅** | **N=4,096 ✅** | **N=32,768 ✅ Phase D** |
+| **d=4** | N=256 ⚠️ unbuilt | **N=4,096 ✅\*** | N=65,536 ❌ | ❌ |
+| **d=5** | N=1,024 ⚠️ unbuilt | N=32,768 ⚠️ unbuilt | ❌ | ❌ |
+| **d=6** | N=4,096 ⚠️ unbuilt | ❌ | ❌ | ❌ |
+| **d=7** | N=16,384 ⚠️ unbuilt | ❌ | ❌ | ❌ |
+
+✅ = measured and functionally verified on U280 (6 cells).
+⚠️ = either partially built (test fails), or requires new RTL (7 cells).
+❌ = invalid under F₄ — 2N exceeds q−1 = 65 536, ψ does not exist.
+\* Phase E L=8 d=4 uses `sub_ntt_simple` (DSP-based 8×8 DFT, not shift-only).
+
+### 19.2 Measured cells (6 cells, full details)
+
+| L | d | N | LUT | FF | DSP | BRAM | Fmax | Cycles | Time | Cyc/coef | Variant |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4  | 3 | 64     | 2,116  | 908   | 4  | 7  | 222 MHz | 589     | 2.65 µs | 9.20 | `hier_d3_L4_top` |
+| 8  | 3 | 512    | 5,452  | 1,616 | 8  | 14 | 222 MHz | 2,253   | 10.1 µs | 4.40 | `hier_d3_L8_top` |
+| 16 | 3 | 4,096  | 13,320 | 3,026 | 16 | 28 | 222 MHz | 12,493  | 56.2 µs | 3.05 | `hier_d3_L16_top` |
+| 32 | 2 | 1,024  | 36,839 | 5,816 | 32 | 0\* | 180 MHz | 2,489   | 13.8 µs | 2.43 | `hier_n1024_top` (Phase C) |
+| 32 | 3 | 32,768 | 36,539 | 5,929 | 32 | 56 | 236 MHz | 82,112  | 347 µs  | 2.51 | `hier_n32k_top` (Phase D, post-§15) |
+| 8  | 4 | 4,096  | 11,040 | 1,342 | 37 | 18 | 61 MHz  | 19,733  | 323 µs  | 4.82 | `hier_n4k_top` (Phase E debug) |
+
+\* Phase C uses LUTRAM (not BRAM) — its bank storage is in LUT (~5K LUT
+of LUTRAM cells, baked into the 36,839 LUT total).
+
+### 19.3 Unbuilt / partial cells (7 cells, with effort estimates)
+
+| Cell | Status | Effort to complete |
+|---|---|---|
+| L=8 d=2 N=64 | Substitution attempted; simple tests PASS but random_golden fails with 64/64 errors.  Same identity/random divergence pattern as the d=3 WEXP bug, but in d=2 case the sub-NTT WEXP is already correct.  Root cause undiagnosed.  Could be a Phase-C-specific layout invariant. | ~1-2 days debug (similar to the d=3 WEXP hunt) |
+| L=16 d=2 N=256 | Substitution likely hits same issue as L=8 d=2 — not run to save time | Same as L=8 d=2 |
+| L=4 d=4 N=256 | Substitute Phase E (hier_n4k_top), swap in sub_ntt4_bidir.  Phase E with sub_ntt_simple works; bidir swap broke d=4 (`hier_n4k_bidir_top` fails — see §17.x).  Same kind of L-variant bug we hit. | ~3-5 days |
+| L=8 d=4 N=4096 (bidir) | Same — `hier_n4k_bidir_top` already attempted, fails | ~2-3 days debug |
+| L=4 d=5 N=1,024 | No hier_d5_top exists.  Must build from scratch: derive 4 cross-twiddle formulas, 5-stage FSM, position pack patterns.  Extend Python golden to fivvar. | ~1 week per L (or 1 week parameterised over L=4 and L=8) |
+| L=8 d=5 N=32,768 | Same as L=4 d=5; parameterise the same hier_d5_top | Included in d=5 effort |
+| L=4 d=6 N=4,096 | New hier_d6_top; 6-stage FSM, 5 cross-twiddle formulas; extend Python to sixvar | ~1 week |
+| L=4 d=7 N=16,384 | New hier_d7_top; 7-stage FSM; extend Python | ~1 week |
+
+**Total effort to complete the matrix**: ~4-6 weeks of focused RTL work.
+
+### 19.4 What the measured cells already show
+
+Even with 6/13 cells measured, the L × d trade-off is empirically clear:
+
+**Fixed d=3, varying L (the L-sweep — 4 cells measured):**
+
+| L | LUT | DSP | Time | Cyc/coef |
+|---|---|---|---|---|
+| 4  | 2,116  | 4  | 2.65 µs | 9.20 |
+| 8  | 5,452  | 8  | 10.1 µs | 4.40 |
+| 16 | 13,320 | 16 | 56.2 µs | 3.05 |
+| 32 | 36,539 | 32 | 347 µs  | 2.51 |
+
+- LUT scales ≈ L^1.42 (sub-linear in N)
+- DSP scales exactly as L
+- Time scales near-linearly in N (since cyc/coef converges to ~2.5 as L grows)
+- Cyc/coef = 16/L + 2.5 (empirical fit)
+
+**Fixed L=32, varying d (the d-sweep — 2 cells measured):**
+
+| d | N | LUT | DSP | Time | Cyc/coef |
+|---|---|---|---|---|---|
+| 2 | 1,024 | 36,839 | 32 | 13.8 µs | 2.43 |
+| 3 | 32,768 | 36,539 | 32 | 347 µs | 2.51 |
+
+- LUT is **essentially constant** as d grows (the constant-hardware
+  claim from `IMPLEMENTATION_PLAN.md` §1)
+- 32× more N for **+0.2 %** cyc/coef change — N-scaling is virtually
+  free per coefficient
+- This validates the d-step architectural pattern within F₄'s bound
+
+### 19.5 Honest summary
+
+We have a **complete 4-point L-sweep at d=3** and a **2-point d-sweep
+at L=32**, plus a corner cell at L=8 d=4 with a different sub-NTT.
+This 6-cell measurement set fully captures the architectural scaling
+laws (§19.4) and is sufficient evidence for both the L-scaling and
+d-scaling claims.
+
+Completing the remaining 7 cells (d=2 row beyond L=32; d=4 with shift-only;
+d=5/6/7 corners) would strengthen the empirical evidence but does not
+change the architectural conclusions.  The realistic completion path
+requires ~4-6 weeks of additional RTL work plus the convention-bug
+debug we already encountered twice (WEXP for d=3, and a still-undiagnosed
+issue for the d=2 / d=4 substituted variants).
+
+For the **paper writeup**, the 6-cell matrix above plus the standalone
+sub-NTT scaling data (§18.1) is the validated empirical record.

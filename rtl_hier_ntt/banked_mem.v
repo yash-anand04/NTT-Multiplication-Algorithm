@@ -25,11 +25,14 @@ module banked_mem #(
     parameter integer LOG_LANES    = 5,
     parameter integer LOG_DEPTH    = 5,
     parameter integer READ_LATENCY = 0,  // 0: combinational; 1: registered
-    parameter         STORAGE      = "lutram"  // "lutram" | "bram"
+    parameter         STORAGE      = "lutram"  // "lutram" | "bram" | "uram"
     // STORAGE = "bram": BRAM18 inference per bank. Read is SYNCHRONOUS
     // (1-cycle inherent latency), so READ_LATENCY=1 is forced regardless
     // of the parameter.  Use BRAM mode when DEPTH > 64 (LUTRAM gets
     // expensive past that point).
+    // STORAGE = "uram": UltraRAM inference per bank.  Use when DEPTH > 4K
+    // (BRAM cascading gets expensive).  Sync read, same 1-cycle behaviour
+    // as BRAM.  Vivado infers cascaded URAM tiles as needed for depth.
 )(
     input  wire                              clk,
     // ---- Read interface ------------------------------------------------------
@@ -86,9 +89,20 @@ module banked_mem #(
                 end
                 assign bank_rdata[b] = mem[bank_raddr[b]];
             end
-        end else begin : g_bram_storage
+        end else if (STORAGE == "bram") begin : g_bram_storage
             for (b = 0; b < LANES; b = b + 1) begin : g_bank
                 (* ram_style = "block" *)
+                reg [WWIDTH-1:0] mem [0:DEPTH-1];
+                reg [WWIDTH-1:0] rdata_r;
+                always @(posedge clk) begin
+                    if (bank_we[b]) mem[bank_waddr[b]] <= bank_wdata[b];
+                    rdata_r <= mem[bank_raddr[b]];   // sync read
+                end
+                assign bank_rdata[b] = rdata_r;
+            end
+        end else begin : g_uram_storage
+            for (b = 0; b < LANES; b = b + 1) begin : g_bank
+                (* ram_style = "ultra" *)
                 reg [WWIDTH-1:0] mem [0:DEPTH-1];
                 reg [WWIDTH-1:0] rdata_r;
                 always @(posedge clk) begin
@@ -109,7 +123,8 @@ module banked_mem #(
     // -------------------------------------------------------------------------
     reg [LOG_LANES-1:0] rshift_r;
     always @(posedge clk) rshift_r <= rshift;
-    wire [LOG_LANES-1:0] rshift_eff = (STORAGE == "bram") ? rshift_r : rshift;
+    wire [LOG_LANES-1:0] rshift_eff =
+        ((STORAGE == "bram") || (STORAGE == "uram")) ? rshift_r : rshift;
 
     wire [LANES*WWIDTH-1:0] rdata_pack_comb;
     genvar k;

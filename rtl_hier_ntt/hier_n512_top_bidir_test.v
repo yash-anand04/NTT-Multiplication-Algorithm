@@ -1,10 +1,11 @@
 // =============================================================================
-// hier_n32k_top.v   (Phase D)
-// Trivariate hierarchical NTT polynomial multiplier.  N = L^3 = 32^3 = 32768.
+// hier_n512_top.v   (Phase D debug variant, L=8)
+// Trivariate hierarchical NTT polynomial multiplier.  N = L^3 = 8^3 = 512.
+// Identical structure to hier_n32k_top.v but with L=8 for fast sim iteration.
 //
-// Layout: flat index i = i1 + L*i2 + L^2*i3, L = 32.
-//   bank(i1, i2, i3) = (i1 + i2 + i3) mod 32           (conflict-free)
-//   pos (i1, i2, i3) = i2 + L*i3                       (per-bank addr in [0,1024))
+// Layout: flat index i = i1 + L*i2 + L^2*i3, L = 8.
+//   bank(i1, i2, i3) = (i1 + i2 + i3) mod 8            (conflict-free)
+//   pos (i1, i2, i3) = i2 + L*i3                       (per-bank addr in [0,64))
 //
 // Forward NTT (per polynomial):
 //   STAGE 0:  pre-twist by psi^i,  32-pt NTT along i3 axis
@@ -30,16 +31,16 @@
 //   d12 : NTT+mul paths  (FWD_L0 with pre-twist, INV_L0 with post-twist).
 // =============================================================================
 
-`ifndef _HIER_N32K_TOP_GUARD
-`define _HIER_N32K_TOP_GUARD
+`ifndef _HIER_N512_TOP_BIDIR_TEST_GUARD
+`define _HIER_N512_TOP_BIDIR_TEST_GUARD
 
-module hier_n32k_top #(
+module hier_n512_top_bidir_test #(
     parameter B       = 16,
-    parameter L       = 32,
-    parameter N       = L * L * L,        // 32768
+    parameter L       = 8,
+    parameter N       = L * L * L,        // 512
     parameter WWIDTH  = B + 1,
-    parameter LOGN    = 15,               // $clog2(N)
-    parameter TW_BITS = LOGN + 1          // 16: psi has order 2N = 65536
+    parameter LOGN    = 9,                // $clog2(N) = 9
+    parameter TW_BITS = LOGN + 1          // 10: psi for N=512 has order 2N = 1024
 )(
     input  wire              clk,
     input  wire              rst,
@@ -125,36 +126,36 @@ module hier_n32k_top #(
     // -------------------------------------------------------------------------
     // Banking parameters
     // -------------------------------------------------------------------------
-    localparam integer LANES     = L;     // 32
-    localparam integer DEPTH     = L * L; // 1024 entries per bank
-    localparam integer LOG_LANES = 5;
-    localparam integer LOG_DEPTH = 10;
+    localparam integer LANES     = L;     // 8
+    localparam integer DEPTH     = L * L; // 64 entries per bank
+    localparam integer LOG_LANES = 3;
+    localparam integer LOG_DEPTH = 6;
 
     // -------------------------------------------------------------------------
     // op_count decomposition.  During compute phases:
-    //   op_low  = op_count[4:0]   = "scan inner" index
-    //   op_high = op_count[9:5]   = "scan outer" index
+    //   op_low  = op_count[2:0]   = "scan inner" index
+    //   op_high = op_count[5:3]   = "scan outer" index
     // Their interpretation as (i1, i2, i3) depends on which axis the current
     // FSM phase is sweeping (NTT lane axis = i_axis, other two = op_low/op_high).
     // -------------------------------------------------------------------------
-    wire [LOG_LANES-1:0] op_low  = op_count[4:0];
-    wire [LOG_LANES-1:0] op_high = op_count[9:5];
+    wire [LOG_LANES-1:0] op_low  = op_count[2:0];
+    wire [LOG_LANES-1:0] op_high = op_count[5:3];
 
     // During LOAD/OUTPUT: op_count = i1 + L*i2 + L^2*i3  (full 15-bit flat index)
-    wire [LOG_LANES-1:0] load_i1 = op_count[4:0];
-    wire [LOG_LANES-1:0] load_i2 = op_count[9:5];
-    wire [LOG_LANES-1:0] load_i3 = op_count[14:10];
-    wire [LOG_LANES-1:0] load_bank = (load_i1 + load_i2 + load_i3) & 5'h1f;
-    // 1-cycle-delayed load_bank for OUTPUT's BRAM-read alignment (Phase D bug 1).
+    wire [LOG_LANES-1:0] load_i1 = op_count[2:0];
+    wire [LOG_LANES-1:0] load_i2 = op_count[5:3];
+    wire [LOG_LANES-1:0] load_i3 = op_count[8:6];
+    wire [LOG_LANES-1:0] load_bank = (load_i1 + load_i2 + load_i3) & 3'h7;
+    // 1-cycle-delayed load_bank for OUTPUT's BRAM-read alignment.
     reg  [LOG_LANES-1:0] load_bank_d1;
     always @(posedge clk) load_bank_d1 <= load_bank;
     wire [LOG_DEPTH-1:0] load_pos  = {load_i3, load_i2};   // i2 + L*i3
 
     // Delayed LOAD writeback (write tap d5 for LOAD phase mul/data path)
-    wire [LOG_LANES-1:0] load_i1_d5 = opcnt_d[5][4:0];
-    wire [LOG_LANES-1:0] load_i2_d5 = opcnt_d[5][9:5];
-    wire [LOG_LANES-1:0] load_i3_d5 = opcnt_d[5][14:10];
-    wire [LOG_LANES-1:0] load_bank_d5 = (load_i1_d5 + load_i2_d5 + load_i3_d5) & 5'h1f;
+    wire [LOG_LANES-1:0] load_i1_d5 = opcnt_d[5][2:0];
+    wire [LOG_LANES-1:0] load_i2_d5 = opcnt_d[5][5:3];
+    wire [LOG_LANES-1:0] load_i3_d5 = opcnt_d[5][8:6];
+    wire [LOG_LANES-1:0] load_bank_d5 = (load_i1_d5 + load_i2_d5 + load_i3_d5) & 3'h7;
     wire [LOG_DEPTH-1:0] load_pos_d5  = {load_i3_d5, load_i2_d5};
 
     // -------------------------------------------------------------------------
@@ -168,7 +169,7 @@ module hier_n32k_top #(
     //   XTW phases: same as the producer NTT's output layout (broadcast pos)
     // -------------------------------------------------------------------------
     // Pre-compute per-lane rpos packs for each pattern.
-    wire [LOG_LANES-1:0] rshift_op = (op_low + op_high) & 5'h1f;
+    wire [LOG_LANES-1:0] rshift_op = (op_low + op_high) & 3'h7;
 
     wire [LANES*LOG_DEPTH-1:0] rpos_axis_i3_pack;     // pos[k] = {k, op_high}  (i3=k, i2=op_high)
     wire [LANES*LOG_DEPTH-1:0] rpos_axis_i2_pack;     // pos[k] = {op_high, k}  (i3=op_high, i2=k)
@@ -177,8 +178,8 @@ module hier_n32k_top #(
     genvar gk;
     generate
         for (gk = 0; gk < LANES; gk = gk + 1) begin : g_rpos
-            assign rpos_axis_i3_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[4:0], op_high};
-            assign rpos_axis_i2_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {op_high, gk[4:0]};
+            assign rpos_axis_i3_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[2:0], op_high};
+            assign rpos_axis_i2_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {op_high, gk[2:0]};
             assign rpos_broadcast_pack[gk*LOG_DEPTH +: LOG_DEPTH] = {op_high, op_low};
             assign rpos_zero_pack    [gk*LOG_DEPTH +: LOG_DEPTH] = {LOG_DEPTH{1'b0}};
         end
@@ -203,21 +204,21 @@ module hier_n32k_top #(
     wire [LANES*LOG_DEPTH-1:0] wpos_bc_d5,  wpos_bc_d8,  wpos_bc_d12;
     generate
         for (gk = 0; gk < LANES; gk = gk + 1) begin : g_wpos
-            assign wpos_i3_d5 [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[4:0], opcnt_d[5][9:5]};
-            assign wpos_i3_d8 [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[4:0], opcnt_d[8][9:5]};
-            assign wpos_i3_d12[gk*LOG_DEPTH +: LOG_DEPTH] = {gk[4:0], opcnt_d[12][9:5]};
-            assign wpos_i2_d5 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[5][9:5],  gk[4:0]};
-            assign wpos_i2_d8 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[8][9:5],  gk[4:0]};
-            assign wpos_i2_d12[gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[12][9:5], gk[4:0]};
-            assign wpos_bc_d5 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[5][9:5],  opcnt_d[5][4:0]};
-            assign wpos_bc_d8 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[8][9:5],  opcnt_d[8][4:0]};
-            assign wpos_bc_d12[gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[12][9:5], opcnt_d[12][4:0]};
+            assign wpos_i3_d5 [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[2:0], opcnt_d[5][5:3]};
+            assign wpos_i3_d8 [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[2:0], opcnt_d[8][5:3]};
+            assign wpos_i3_d12[gk*LOG_DEPTH +: LOG_DEPTH] = {gk[2:0], opcnt_d[12][5:3]};
+            assign wpos_i2_d5 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[5][5:3],  gk[2:0]};
+            assign wpos_i2_d8 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[8][5:3],  gk[2:0]};
+            assign wpos_i2_d12[gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[12][5:3], gk[2:0]};
+            assign wpos_bc_d5 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[5][5:3],  opcnt_d[5][2:0]};
+            assign wpos_bc_d8 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[8][5:3],  opcnt_d[8][2:0]};
+            assign wpos_bc_d12[gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[12][5:3], opcnt_d[12][2:0]};
         end
     endgenerate
 
-    wire [LOG_LANES-1:0] wshift_d5  = (opcnt_d[5][4:0]  + opcnt_d[5][9:5])  & 5'h1f;
-    wire [LOG_LANES-1:0] wshift_d8  = (opcnt_d[8][4:0]  + opcnt_d[8][9:5])  & 5'h1f;
-    wire [LOG_LANES-1:0] wshift_d12 = (opcnt_d[12][4:0] + opcnt_d[12][9:5]) & 5'h1f;
+    wire [LOG_LANES-1:0] wshift_d5  = (opcnt_d[5][2:0]  + opcnt_d[5][5:3])  & 3'h7;
+    wire [LOG_LANES-1:0] wshift_d8  = (opcnt_d[8][2:0]  + opcnt_d[8][5:3])  & 3'h7;
+    wire [LOG_LANES-1:0] wshift_d12 = (opcnt_d[12][2:0] + opcnt_d[12][5:3]) & 3'h7;
 
     // -------------------------------------------------------------------------
     // Input-data delay chain (for LOAD)
@@ -264,11 +265,11 @@ module hier_n32k_top #(
     generate
         for (tg = 0; tg < L; tg = tg + 1) begin : gen_tw_lanes
             // Twiddle ROMs are now BRAM-backed with REGISTERED=1 (1-cycle read
-            // latency), paralleling the data BRAM.  The idx therefore uses the
-            // CURRENT op_count / state (the registered ROM output then arrives
-            // at the same d1 cycle as the BRAM data, matching mul_a timing).
-            wire [LOG_LANES-1:0] olo_d0 = op_count[4:0];
-            wire [LOG_LANES-1:0] ohi_d0 = op_count[9:5];
+            // latency), paralleling the data BRAM.  The idx uses CURRENT
+            // op_count / state; the registered ROM output then arrives at the
+            // same d1 cycle as the BRAM data, aligning with mul_a.
+            wire [LOG_LANES-1:0] olo_d0 = op_count[2:0];
+            wire [LOG_LANES-1:0] ohi_d0 = op_count[5:3];
             wire [TW_BITS-1:0] tw_fwd_l0_idx   =
                 (olo_d0 + L*ohi_d0 + L*L*tg) % (2*N);
             wire [TW_BITS-1:0] tw_xtw1_idx     =
@@ -277,16 +278,17 @@ module hier_n32k_top #(
                 (2 * olo_d0 * (L*tg + ohi_d0)) % (2*N);
 
             // INV_L0 mul fires 8 cycles AFTER NTT issue; with the +1 ROM stage
-            // we shift the idx tap from d8 to d7 (ROM output arrives at d8).
-            wire [LOG_LANES-1:0] olo_d7 = opcnt_d[7][4:0];
-            wire [LOG_LANES-1:0] ohi_d7 = opcnt_d[7][9:5];
+            // the idx tap shifts from d8 to d7 (ROM output arrives at d8).
+            wire [LOG_LANES-1:0] olo_d7 = opcnt_d[7][2:0];
+            wire [LOG_LANES-1:0] ohi_d7 = opcnt_d[7][5:3];
             wire [TW_BITS-1:0] tw_inv_l0_idx_d7 = inv_tw_idx(
                 (olo_d7 + L*ohi_d7 + L*L*tg) % (2*N));
 
             wire [TW_BITS-1:0] tw_inv_xtw1_idx = inv_tw_idx(tw_xtw1_idx);
-            // INV_XTW2 has DIFFERENT (op_low, op_high, lane) -> (k2, k3, i1)
-            // mapping vs FWD_XTW2's (i1, k3, k2).  Element at (i1, k2, k3) needs
-            // psi^(-2*i1*(L*k2+k3)) = psi^(-2*tg*(L*olo+ohi)) for the inverse iteration.
+            // INV_XTW2 has DIFFERENT (op_low, op_high, lane) -> (k2, k3, i1) mapping
+            // vs FWD_XTW2's (i1, k3, k2).  Element at (i1, k2, k3) still needs
+            // psi^(-2*i1*(L*k2+k3)) = psi^(-2*tg*(L*olo+ohi)) for the inverse
+            // iteration.
             wire [TW_BITS-1:0] tw_inv_xtw2_idx =
                 inv_tw_idx((2 * tg * (L*olo_d0 + ohi_d0)) % (2*N));
 
@@ -356,7 +358,7 @@ module hier_n32k_top #(
     end
 
     wire [L*WWIDTH-1:0] ntt_out_pack;
-    sub_ntt32_bidir #(.B(B)) u_subntt (
+    sub_ntt8_bidir #(.B(B)) u_subntt (
         .clk(clk), .rst(rst),
         .start(ntt_start_d1), .inverse(ntt_inverse_d1),
         .in_norm(ntt_in_reg), .out_norm(ntt_out_pack),
@@ -385,21 +387,14 @@ module hier_n32k_top #(
 
     `BMEM_DECL(mem_a)
     `BMEM_DECL(mem_b)
-    `BMEM_DECL(mem_scratch)
-    // Memory consolidation (2026-05-25): mem_work + mem_trans collapsed into
-    // mem_scratch.  Validated at L=8 d=4 (hier_n4k_top) — same pattern here.
-    // In-place R/W is safe because (a) every scratch-using phase has
-    // read_pattern == write_pattern of the next phase's read, so the data
-    // physical layout is preserved across the swap; (b) the existing
-    // 12-cycle drain means phase X's last write (at SCAN_CYCLES+11) commits
-    // before phase X+1's first read (at SCAN_LEN = SCAN_CYCLES+12).
-    // Saves ~half the BRAM and likely recovers some Fmax via less placement
-    // congestion on the scratch crossbar.
+    `BMEM_DECL(mem_work)
+    `BMEM_DECL(mem_trans)
 
-    // Logical aliases
+    // Logical aliases (the same physical mem holds different things across phases)
     wire [LANES*WWIDTH-1:0] raw_a_rdata   = mem_a_rdata;
     wire [LANES*WWIDTH-1:0] raw_b_rdata   = mem_b_rdata;
-    wire [LANES*WWIDTH-1:0] scratch_rdata = mem_scratch_rdata;
+    wire [LANES*WWIDTH-1:0] work_rdata    = mem_work_rdata;
+    wire [LANES*WWIDTH-1:0] trans_rdata   = mem_trans_rdata;
 
     function [LANES*WWIDTH-1:0] broadcast17;
         input [WWIDTH-1:0] v;
@@ -433,9 +428,9 @@ module hier_n32k_top #(
 
     // ---- mem_a -------------------------------------------------------------
     always @(*) begin
-        mem_a_rshift = 5'd0;
+        mem_a_rshift = 3'd0;
         mem_a_rpos   = rpos_zero_pack;
-        mem_a_wshift = 5'd0;
+        mem_a_wshift = 3'd0;
         mem_a_wpos   = rpos_zero_pack;
         mem_a_wdata  = {LANES*WWIDTH{1'b0}};
         mem_a_we     = {LANES{1'b0}};
@@ -455,7 +450,7 @@ module hier_n32k_top #(
                 mem_a_rpos   = rpos_broadcast_pack;   // spec_a/prod stored with axis_i1 layout
             end
             ST_OUTPUT: begin
-                mem_a_rshift = 5'd0;
+                mem_a_rshift = 3'd0;
                 mem_a_rpos[load_bank*LOG_DEPTH +: LOG_DEPTH] = load_pos;
             end
             default: ;
@@ -493,9 +488,9 @@ module hier_n32k_top #(
 
     // ---- mem_b -------------------------------------------------------------
     always @(*) begin
-        mem_b_rshift = 5'd0;
+        mem_b_rshift = 3'd0;
         mem_b_rpos   = rpos_zero_pack;
-        mem_b_wshift = 5'd0;
+        mem_b_wshift = 3'd0;
         mem_b_wpos   = rpos_zero_pack;
         mem_b_wdata  = {LANES*WWIDTH{1'b0}};
         mem_b_we     = {LANES{1'b0}};
@@ -525,108 +520,122 @@ module hier_n32k_top #(
         end
     end
 
-    // ---- mem_scratch (consolidates mem_work + mem_trans) ------------------
-    // Reads: all NTT-input phases that previously read mem_trans, plus all
-    // XTW-input phases that previously read mem_work.
-    // Writes: all NTT/XTW output phases that previously wrote to either.
-    // All (state, tap) combinations are mutually exclusive — proven by the
-    // separate always blocks they came from.
+    // ---- mem_work ----------------------------------------------------------
+    // Roles by phase:
+    //   read in FWD_XTW1_A/B (consumes FWD_L0 output) - axis i3 layout
+    //   read in FWD_XTW2_A/B (consumes FWD_L1 output) - axis i2 layout
+    //   read in INV_XTW2 (consumes INV_L2 output)      - broadcast pos (k1 NTT out)
+    //   read in INV_XTW1 (consumes INV_L1 output)      - axis i2 layout
+    //   write from FWD_L0_A/B (d12 NTT+mul output)     - axis i3 layout
+    //   write from FWD_L1_A/B (d8 NTT output)          - axis i2 layout
+    //   write from INV_L2     (d8 NTT output)          - broadcast layout
+    //   write from INV_L1     (d8 NTT output)          - axis i2 layout
     always @(*) begin
-        mem_scratch_rshift = 5'd0;
-        mem_scratch_rpos   = rpos_zero_pack;
-        mem_scratch_wshift = 5'd0;
-        mem_scratch_wpos   = rpos_zero_pack;
-        mem_scratch_wdata  = {LANES*WWIDTH{1'b0}};
-        mem_scratch_we     = {LANES{1'b0}};
+        mem_work_rshift = 3'd0;
+        mem_work_rpos   = rpos_zero_pack;
+        mem_work_wshift = 3'd0;
+        mem_work_wpos   = rpos_zero_pack;
+        mem_work_wdata  = {LANES*WWIDTH{1'b0}};
+        mem_work_we     = {LANES{1'b0}};
 
         case (state)
-            // XTW reads (previously mem_work)
             ST_FWD_XTW1_A, ST_FWD_XTW1_B: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_axis_i3_pack;
+                mem_work_rshift = rshift_op;
+                mem_work_rpos   = rpos_axis_i3_pack;
             end
             ST_FWD_XTW2_A, ST_FWD_XTW2_B: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_axis_i2_pack;
+                mem_work_rshift = rshift_op;
+                mem_work_rpos   = rpos_axis_i2_pack;
             end
             ST_INV_XTW2: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_broadcast_pack;
+                mem_work_rshift = rshift_op;
+                mem_work_rpos   = rpos_broadcast_pack;
             end
             ST_INV_XTW1: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_axis_i2_pack;
-            end
-            // NTT reads (previously mem_trans)
-            ST_FWD_L1_A, ST_FWD_L1_B: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_axis_i2_pack;
-            end
-            ST_FWD_L2_A, ST_FWD_L2_B: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_broadcast_pack;
-            end
-            ST_INV_L1: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_axis_i2_pack;
-            end
-            ST_INV_L0: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_axis_i3_pack;
+                mem_work_rshift = rshift_op;
+                mem_work_rpos   = rpos_axis_i2_pack;
             end
             default: ;
         endcase
 
-        // d12 writes (NTT+mul): only FWD_L0
         if ((state_d[12] == ST_FWD_L0_A || state_d[12] == ST_FWD_L0_B) && valid_d[12]) begin
-            mem_scratch_wshift = wshift_d12;
-            mem_scratch_wpos   = wpos_i3_d12;
-            mem_scratch_wdata  = ntt_out_pack;
-            mem_scratch_we     = {LANES{1'b1}};
+            mem_work_wshift = wshift_d12;
+            mem_work_wpos   = wpos_i3_d12;
+            mem_work_wdata  = ntt_out_pack;   // FWD_L0 = pre-twist mul then NTT
+            mem_work_we     = {LANES{1'b1}};
         end
-        // d8 writes (NTT only): FWD_L1, INV_L2, INV_L1
         else if ((state_d[8] == ST_FWD_L1_A || state_d[8] == ST_FWD_L1_B) && valid_d[8]) begin
-            mem_scratch_wshift = wshift_d8;
-            mem_scratch_wpos   = wpos_i2_d8;
-            mem_scratch_wdata  = ntt_out_pack;
-            mem_scratch_we     = {LANES{1'b1}};
+            mem_work_wshift = wshift_d8;
+            mem_work_wpos   = wpos_i2_d8;
+            mem_work_wdata  = ntt_out_pack;
+            mem_work_we     = {LANES{1'b1}};
         end
         else if (state_d[8] == ST_INV_L2 && valid_d[8]) begin
-            mem_scratch_wshift = wshift_d8;
-            mem_scratch_wpos   = wpos_bc_d8;
-            mem_scratch_wdata  = ntt_out_pack;
-            mem_scratch_we     = {LANES{1'b1}};
+            mem_work_wshift = wshift_d8;
+            mem_work_wpos   = wpos_bc_d8;
+            mem_work_wdata  = ntt_out_pack;
+            mem_work_we     = {LANES{1'b1}};
         end
         else if (state_d[8] == ST_INV_L1 && valid_d[8]) begin
-            mem_scratch_wshift = wshift_d8;
-            mem_scratch_wpos   = wpos_i2_d8;
-            mem_scratch_wdata  = ntt_out_pack;
-            mem_scratch_we     = {LANES{1'b1}};
+            mem_work_wshift = wshift_d8;
+            mem_work_wpos   = wpos_i2_d8;
+            mem_work_wdata  = ntt_out_pack;
+            mem_work_we     = {LANES{1'b1}};
         end
-        // d5 writes (mul only): FWD_XTW1, FWD_XTW2, INV_XTW2, INV_XTW1
-        else if ((state_d[5] == ST_FWD_XTW1_A || state_d[5] == ST_FWD_XTW1_B) && valid_d[5]) begin
-            mem_scratch_wshift = wshift_d5;
-            mem_scratch_wpos   = wpos_i3_d5;
-            mem_scratch_wdata  = mul_out_pack;
-            mem_scratch_we     = {LANES{1'b1}};
+    end
+
+    // ---- mem_trans ---------------------------------------------------------
+    always @(*) begin
+        mem_trans_rshift = 3'd0;
+        mem_trans_rpos   = rpos_zero_pack;
+        mem_trans_wshift = 3'd0;
+        mem_trans_wpos   = rpos_zero_pack;
+        mem_trans_wdata  = {LANES*WWIDTH{1'b0}};
+        mem_trans_we     = {LANES{1'b0}};
+
+        case (state)
+            ST_FWD_L1_A, ST_FWD_L1_B: begin
+                mem_trans_rshift = rshift_op;
+                mem_trans_rpos   = rpos_axis_i2_pack;
+            end
+            ST_FWD_L2_A, ST_FWD_L2_B: begin
+                mem_trans_rshift = rshift_op;
+                mem_trans_rpos   = rpos_broadcast_pack;
+            end
+            ST_INV_L1: begin
+                mem_trans_rshift = rshift_op;
+                mem_trans_rpos   = rpos_axis_i2_pack;
+            end
+            ST_INV_L0: begin
+                mem_trans_rshift = rshift_op;
+                mem_trans_rpos   = rpos_axis_i3_pack;
+            end
+            default: ;
+        endcase
+
+        if ((state_d[5] == ST_FWD_XTW1_A || state_d[5] == ST_FWD_XTW1_B) && valid_d[5]) begin
+            mem_trans_wshift = wshift_d5;
+            mem_trans_wpos   = wpos_i3_d5;
+            mem_trans_wdata  = mul_out_pack;
+            mem_trans_we     = {LANES{1'b1}};
         end
         else if ((state_d[5] == ST_FWD_XTW2_A || state_d[5] == ST_FWD_XTW2_B) && valid_d[5]) begin
-            mem_scratch_wshift = wshift_d5;
-            mem_scratch_wpos   = wpos_i2_d5;
-            mem_scratch_wdata  = mul_out_pack;
-            mem_scratch_we     = {LANES{1'b1}};
+            mem_trans_wshift = wshift_d5;
+            mem_trans_wpos   = wpos_i2_d5;
+            mem_trans_wdata  = mul_out_pack;
+            mem_trans_we     = {LANES{1'b1}};
         end
         else if (state_d[5] == ST_INV_XTW2 && valid_d[5]) begin
-            mem_scratch_wshift = wshift_d5;
-            mem_scratch_wpos   = wpos_bc_d5;
-            mem_scratch_wdata  = mul_out_pack;
-            mem_scratch_we     = {LANES{1'b1}};
+            mem_trans_wshift = wshift_d5;
+            mem_trans_wpos   = wpos_bc_d5;
+            mem_trans_wdata  = mul_out_pack;
+            mem_trans_we     = {LANES{1'b1}};
         end
         else if (state_d[5] == ST_INV_XTW1 && valid_d[5]) begin
-            mem_scratch_wshift = wshift_d5;
-            mem_scratch_wpos   = wpos_i2_d5;
-            mem_scratch_wdata  = mul_out_pack;
-            mem_scratch_we     = {LANES{1'b1}};
+            mem_trans_wshift = wshift_d5;
+            mem_trans_wpos   = wpos_i2_d5;
+            mem_trans_wdata  = mul_out_pack;
+            mem_trans_we     = {LANES{1'b1}};
         end
     end
 
@@ -643,19 +652,29 @@ module hier_n32k_top #(
             ntt_in_pack = mul_out_pack;
         else begin
             case (state_d[1])
-                ST_FWD_L1_A, ST_FWD_L1_B,
-                ST_FWD_L2_A, ST_FWD_L2_B,
-                ST_INV_L1, ST_INV_L0:
-                    ntt_in_pack = scratch_rdata;
+                ST_FWD_L1_A, ST_FWD_L1_B:
+                    ntt_in_pack = trans_rdata;
+                ST_FWD_L2_A, ST_FWD_L2_B:
+                    ntt_in_pack = trans_rdata;
                 ST_INV_L2:
                     ntt_in_pack = mem_a_rdata;
+                ST_INV_L1:
+                    ntt_in_pack = trans_rdata;   // bug 5: was work_rdata
+                ST_INV_L0:
+                    ntt_in_pack = trans_rdata;
                 default: ;
             endcase
         end
     end
 
-    // mul_a / mul_b pack.  Post-consolidation: XTW phases read from mem_scratch
-    // (was mem_work).  PWM reads mem_a/mem_b in parallel.
+    // mul_a / mul_b pack.  Each phase muxes the appropriate source.
+    //   FWD_L0 : a = raw, b = tw_pack (pre-twist)
+    //   FWD_XTW1 : a = work_rdata,  b = tw_pack
+    //   FWD_XTW2 : a = work_rdata,  b = tw_pack
+    //   PWM      : a = mem_a_rdata, b = mem_b_rdata
+    //   INV_XTW2 : a = work_rdata,  b = tw_pack
+    //   INV_XTW1 : a = work_rdata,  b = tw_pack
+    //   INV_L0   : a = ntt_out_pack, b = tw_pack  (post-twist, mul fires at state_d[8])
     always @(*) begin
         mul_a_pack = {L*WWIDTH{1'b0}};
         mul_b_pack = {L*WWIDTH{1'b0}};
@@ -676,8 +695,8 @@ module hier_n32k_top #(
                     ST_FWD_XTW1_A, ST_FWD_XTW1_B,
                     ST_FWD_XTW2_A, ST_FWD_XTW2_B,
                     ST_INV_XTW1, ST_INV_XTW2: begin
-                        mul_a_pack[ci*WWIDTH +: WWIDTH] = scratch_rdata[ci*WWIDTH +: WWIDTH];
-                        mul_b_pack[ci*WWIDTH +: WWIDTH] = tw_pack      [ci*WWIDTH +: WWIDTH];
+                        mul_a_pack[ci*WWIDTH +: WWIDTH] = work_rdata[ci*WWIDTH +: WWIDTH];
+                        mul_b_pack[ci*WWIDTH +: WWIDTH] = tw_pack   [ci*WWIDTH +: WWIDTH];
                     end
                     ST_PWM: begin
                         mul_a_pack[ci*WWIDTH +: WWIDTH] = mem_a_rdata[ci*WWIDTH +: WWIDTH];
@@ -815,8 +834,10 @@ module hier_n32k_top #(
 
                 ST_OUTPUT: begin
                     cycle_count    <= cycle_count + 1;
-                    // mem_a sync read has +1 cycle latency; data_out then registers
-                    // one more cycle.  Total OUTPUT phase length = N + 2.
+                    // mem_a sync read has +1 cycle latency; index rdata with the
+                    // load_bank from 1 cycle ago (matches when the read was issued).
+                    // data_out registers one more cycle => 2-cycle total latency.
+                    // valid HIGH for the N data cycles after BRAM+register drain.
                     data_out       <= mem_a_rdata[load_bank_d1*WWIDTH +: WWIDTH];
                     data_out_valid <= (op_count >= 1) && (op_count < N+1);
                     if (op_count == N+1) begin

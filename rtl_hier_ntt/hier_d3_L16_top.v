@@ -30,15 +30,15 @@
 //   d12 : NTT+mul paths  (FWD_L0 with pre-twist, INV_L0 with post-twist).
 // =============================================================================
 
-`ifndef _HIER_N32K_TOP_GUARD
-`define _HIER_N32K_TOP_GUARD
+`ifndef _HIER_D3_L16_TOP_GUARD
+`define _HIER_D3_L16_TOP_GUARD
 
-module hier_n32k_top #(
+module hier_d3_L16_top #(
     parameter B       = 16,
-    parameter L       = 32,
+    parameter L       = 16,
     parameter N       = L * L * L,        // 32768
     parameter WWIDTH  = B + 1,
-    parameter LOGN    = 15,               // $clog2(N)
+    parameter LOGN    = 12,               // $clog2(N)
     parameter TW_BITS = LOGN + 1          // 16: psi has order 2N = 65536
 )(
     input  wire              clk,
@@ -56,7 +56,7 @@ module hier_n32k_top #(
     // FSM states
     // -------------------------------------------------------------------------
     localparam [4:0]
-        ST_IDLE       = 5'd0,
+        ST_IDLE       = 4'd0,
         ST_LOAD       = 5'd1,
         // -- A polynomial forward chain --
         ST_FWD_L0_A   = 5'd2,    // pre-twist + NTT along i3
@@ -99,7 +99,7 @@ module hier_n32k_top #(
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             for (ds = 1; ds <= 12; ds = ds + 1) begin
-                state_d[ds] <= 5'd0;
+                state_d[ds] <= 4'd0;
                 opcnt_d[ds] <= {(LOGN+1){1'b0}};
                 valid_d[ds] <= 1'b0;
             end
@@ -127,34 +127,34 @@ module hier_n32k_top #(
     // -------------------------------------------------------------------------
     localparam integer LANES     = L;     // 32
     localparam integer DEPTH     = L * L; // 1024 entries per bank
-    localparam integer LOG_LANES = 5;
-    localparam integer LOG_DEPTH = 10;
+    localparam integer LOG_LANES = 4;
+    localparam integer LOG_DEPTH = 8;
 
     // -------------------------------------------------------------------------
     // op_count decomposition.  During compute phases:
-    //   op_low  = op_count[4:0]   = "scan inner" index
-    //   op_high = op_count[9:5]   = "scan outer" index
+    //   op_low  = op_count[3:0]   = "scan inner" index
+    //   op_high = op_count[7:4]   = "scan outer" index
     // Their interpretation as (i1, i2, i3) depends on which axis the current
     // FSM phase is sweeping (NTT lane axis = i_axis, other two = op_low/op_high).
     // -------------------------------------------------------------------------
-    wire [LOG_LANES-1:0] op_low  = op_count[4:0];
-    wire [LOG_LANES-1:0] op_high = op_count[9:5];
+    wire [LOG_LANES-1:0] op_low  = op_count[3:0];
+    wire [LOG_LANES-1:0] op_high = op_count[7:4];
 
     // During LOAD/OUTPUT: op_count = i1 + L*i2 + L^2*i3  (full 15-bit flat index)
-    wire [LOG_LANES-1:0] load_i1 = op_count[4:0];
-    wire [LOG_LANES-1:0] load_i2 = op_count[9:5];
-    wire [LOG_LANES-1:0] load_i3 = op_count[14:10];
-    wire [LOG_LANES-1:0] load_bank = (load_i1 + load_i2 + load_i3) & 5'h1f;
+    wire [LOG_LANES-1:0] load_i1 = op_count[3:0];
+    wire [LOG_LANES-1:0] load_i2 = op_count[7:4];
+    wire [LOG_LANES-1:0] load_i3 = op_count[11:8];
+    wire [LOG_LANES-1:0] load_bank = (load_i1 + load_i2 + load_i3) & 4'hf;
     // 1-cycle-delayed load_bank for OUTPUT's BRAM-read alignment (Phase D bug 1).
     reg  [LOG_LANES-1:0] load_bank_d1;
     always @(posedge clk) load_bank_d1 <= load_bank;
     wire [LOG_DEPTH-1:0] load_pos  = {load_i3, load_i2};   // i2 + L*i3
 
     // Delayed LOAD writeback (write tap d5 for LOAD phase mul/data path)
-    wire [LOG_LANES-1:0] load_i1_d5 = opcnt_d[5][4:0];
-    wire [LOG_LANES-1:0] load_i2_d5 = opcnt_d[5][9:5];
-    wire [LOG_LANES-1:0] load_i3_d5 = opcnt_d[5][14:10];
-    wire [LOG_LANES-1:0] load_bank_d5 = (load_i1_d5 + load_i2_d5 + load_i3_d5) & 5'h1f;
+    wire [LOG_LANES-1:0] load_i1_d5 = opcnt_d[5][3:0];
+    wire [LOG_LANES-1:0] load_i2_d5 = opcnt_d[5][7:4];
+    wire [LOG_LANES-1:0] load_i3_d5 = opcnt_d[5][11:8];
+    wire [LOG_LANES-1:0] load_bank_d5 = (load_i1_d5 + load_i2_d5 + load_i3_d5) & 4'hf;
     wire [LOG_DEPTH-1:0] load_pos_d5  = {load_i3_d5, load_i2_d5};
 
     // -------------------------------------------------------------------------
@@ -168,7 +168,7 @@ module hier_n32k_top #(
     //   XTW phases: same as the producer NTT's output layout (broadcast pos)
     // -------------------------------------------------------------------------
     // Pre-compute per-lane rpos packs for each pattern.
-    wire [LOG_LANES-1:0] rshift_op = (op_low + op_high) & 5'h1f;
+    wire [LOG_LANES-1:0] rshift_op = (op_low + op_high) & 4'hf;
 
     wire [LANES*LOG_DEPTH-1:0] rpos_axis_i3_pack;     // pos[k] = {k, op_high}  (i3=k, i2=op_high)
     wire [LANES*LOG_DEPTH-1:0] rpos_axis_i2_pack;     // pos[k] = {op_high, k}  (i3=op_high, i2=k)
@@ -177,8 +177,8 @@ module hier_n32k_top #(
     genvar gk;
     generate
         for (gk = 0; gk < LANES; gk = gk + 1) begin : g_rpos
-            assign rpos_axis_i3_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[4:0], op_high};
-            assign rpos_axis_i2_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {op_high, gk[4:0]};
+            assign rpos_axis_i3_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[3:0], op_high};
+            assign rpos_axis_i2_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {op_high, gk[3:0]};
             assign rpos_broadcast_pack[gk*LOG_DEPTH +: LOG_DEPTH] = {op_high, op_low};
             assign rpos_zero_pack    [gk*LOG_DEPTH +: LOG_DEPTH] = {LOG_DEPTH{1'b0}};
         end
@@ -189,11 +189,11 @@ module hier_n32k_top #(
     // unregistered versions.  Build per-tap write-pos packs.
     function [LOG_LANES-1:0] olo;
         input [3:0] tap;
-        olo = opcnt_d[tap][4:0];
+        olo = opcnt_d[tap][3:0];
     endfunction
     function [LOG_LANES-1:0] ohi;
         input [3:0] tap;
-        ohi = opcnt_d[tap][9:5];
+        ohi = opcnt_d[tap][7:4];
     endfunction
 
     // wpos packs for each (tap, axis-pattern) combination.  We need taps d5,
@@ -203,21 +203,21 @@ module hier_n32k_top #(
     wire [LANES*LOG_DEPTH-1:0] wpos_bc_d5,  wpos_bc_d8,  wpos_bc_d12;
     generate
         for (gk = 0; gk < LANES; gk = gk + 1) begin : g_wpos
-            assign wpos_i3_d5 [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[4:0], opcnt_d[5][9:5]};
-            assign wpos_i3_d8 [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[4:0], opcnt_d[8][9:5]};
-            assign wpos_i3_d12[gk*LOG_DEPTH +: LOG_DEPTH] = {gk[4:0], opcnt_d[12][9:5]};
-            assign wpos_i2_d5 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[5][9:5],  gk[4:0]};
-            assign wpos_i2_d8 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[8][9:5],  gk[4:0]};
-            assign wpos_i2_d12[gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[12][9:5], gk[4:0]};
-            assign wpos_bc_d5 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[5][9:5],  opcnt_d[5][4:0]};
-            assign wpos_bc_d8 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[8][9:5],  opcnt_d[8][4:0]};
-            assign wpos_bc_d12[gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[12][9:5], opcnt_d[12][4:0]};
+            assign wpos_i3_d5 [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[3:0], opcnt_d[5][7:4]};
+            assign wpos_i3_d8 [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[3:0], opcnt_d[8][7:4]};
+            assign wpos_i3_d12[gk*LOG_DEPTH +: LOG_DEPTH] = {gk[3:0], opcnt_d[12][7:4]};
+            assign wpos_i2_d5 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[5][7:4],  gk[3:0]};
+            assign wpos_i2_d8 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[8][7:4],  gk[3:0]};
+            assign wpos_i2_d12[gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[12][7:4], gk[3:0]};
+            assign wpos_bc_d5 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[5][7:4],  opcnt_d[5][3:0]};
+            assign wpos_bc_d8 [gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[8][7:4],  opcnt_d[8][3:0]};
+            assign wpos_bc_d12[gk*LOG_DEPTH +: LOG_DEPTH] = {opcnt_d[12][7:4], opcnt_d[12][3:0]};
         end
     endgenerate
 
-    wire [LOG_LANES-1:0] wshift_d5  = (opcnt_d[5][4:0]  + opcnt_d[5][9:5])  & 5'h1f;
-    wire [LOG_LANES-1:0] wshift_d8  = (opcnt_d[8][4:0]  + opcnt_d[8][9:5])  & 5'h1f;
-    wire [LOG_LANES-1:0] wshift_d12 = (opcnt_d[12][4:0] + opcnt_d[12][9:5]) & 5'h1f;
+    wire [LOG_LANES-1:0] wshift_d5  = (opcnt_d[5][3:0]  + opcnt_d[5][7:4])  & 4'hf;
+    wire [LOG_LANES-1:0] wshift_d8  = (opcnt_d[8][3:0]  + opcnt_d[8][7:4])  & 4'hf;
+    wire [LOG_LANES-1:0] wshift_d12 = (opcnt_d[12][3:0] + opcnt_d[12][7:4]) & 4'hf;
 
     // -------------------------------------------------------------------------
     // Input-data delay chain (for LOAD)
@@ -267,8 +267,8 @@ module hier_n32k_top #(
             // latency), paralleling the data BRAM.  The idx therefore uses the
             // CURRENT op_count / state (the registered ROM output then arrives
             // at the same d1 cycle as the BRAM data, matching mul_a timing).
-            wire [LOG_LANES-1:0] olo_d0 = op_count[4:0];
-            wire [LOG_LANES-1:0] ohi_d0 = op_count[9:5];
+            wire [LOG_LANES-1:0] olo_d0 = op_count[3:0];
+            wire [LOG_LANES-1:0] ohi_d0 = op_count[7:4];
             wire [TW_BITS-1:0] tw_fwd_l0_idx   =
                 (olo_d0 + L*ohi_d0 + L*L*tg) % (2*N);
             wire [TW_BITS-1:0] tw_xtw1_idx     =
@@ -278,8 +278,8 @@ module hier_n32k_top #(
 
             // INV_L0 mul fires 8 cycles AFTER NTT issue; with the +1 ROM stage
             // we shift the idx tap from d8 to d7 (ROM output arrives at d8).
-            wire [LOG_LANES-1:0] olo_d7 = opcnt_d[7][4:0];
-            wire [LOG_LANES-1:0] ohi_d7 = opcnt_d[7][9:5];
+            wire [LOG_LANES-1:0] olo_d7 = opcnt_d[7][3:0];
+            wire [LOG_LANES-1:0] ohi_d7 = opcnt_d[7][7:4];
             wire [TW_BITS-1:0] tw_inv_l0_idx_d7 = inv_tw_idx(
                 (olo_d7 + L*ohi_d7 + L*L*tg) % (2*N));
 
@@ -356,7 +356,7 @@ module hier_n32k_top #(
     end
 
     wire [L*WWIDTH-1:0] ntt_out_pack;
-    sub_ntt32_bidir #(.B(B)) u_subntt (
+    sub_ntt16_bidir #(.B(B)) u_subntt (
         .clk(clk), .rst(rst),
         .start(ntt_start_d1), .inverse(ntt_inverse_d1),
         .in_norm(ntt_in_reg), .out_norm(ntt_out_pack),
@@ -433,9 +433,9 @@ module hier_n32k_top #(
 
     // ---- mem_a -------------------------------------------------------------
     always @(*) begin
-        mem_a_rshift = 5'd0;
+        mem_a_rshift = 4'd0;
         mem_a_rpos   = rpos_zero_pack;
-        mem_a_wshift = 5'd0;
+        mem_a_wshift = 4'd0;
         mem_a_wpos   = rpos_zero_pack;
         mem_a_wdata  = {LANES*WWIDTH{1'b0}};
         mem_a_we     = {LANES{1'b0}};
@@ -455,7 +455,7 @@ module hier_n32k_top #(
                 mem_a_rpos   = rpos_broadcast_pack;   // spec_a/prod stored with axis_i1 layout
             end
             ST_OUTPUT: begin
-                mem_a_rshift = 5'd0;
+                mem_a_rshift = 4'd0;
                 mem_a_rpos[load_bank*LOG_DEPTH +: LOG_DEPTH] = load_pos;
             end
             default: ;
@@ -493,9 +493,9 @@ module hier_n32k_top #(
 
     // ---- mem_b -------------------------------------------------------------
     always @(*) begin
-        mem_b_rshift = 5'd0;
+        mem_b_rshift = 4'd0;
         mem_b_rpos   = rpos_zero_pack;
-        mem_b_wshift = 5'd0;
+        mem_b_wshift = 4'd0;
         mem_b_wpos   = rpos_zero_pack;
         mem_b_wdata  = {LANES*WWIDTH{1'b0}};
         mem_b_we     = {LANES{1'b0}};
@@ -532,9 +532,9 @@ module hier_n32k_top #(
     // All (state, tap) combinations are mutually exclusive — proven by the
     // separate always blocks they came from.
     always @(*) begin
-        mem_scratch_rshift = 5'd0;
+        mem_scratch_rshift = 4'd0;
         mem_scratch_rpos   = rpos_zero_pack;
-        mem_scratch_wshift = 5'd0;
+        mem_scratch_wshift = 4'd0;
         mem_scratch_wpos   = rpos_zero_pack;
         mem_scratch_wdata  = {LANES*WWIDTH{1'b0}};
         mem_scratch_we     = {LANES{1'b0}};
@@ -832,4 +832,4 @@ module hier_n32k_top #(
 
 endmodule
 
-`endif // _HIER_N32K_TOP_GUARD
+`endif // _HIER_D3_L16_TOP_GUARD

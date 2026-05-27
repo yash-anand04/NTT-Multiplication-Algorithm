@@ -22,13 +22,13 @@
 //   - twiddle_gen runs in REGISTERED=0 (combinational) mode.
 // =============================================================================
 
-`ifndef _HIER_N1024_TOP_GUARD
-`define _HIER_N1024_TOP_GUARD
+`ifndef _HIER_D2_L8_TOP_GUARD
+`define _HIER_D2_L8_TOP_GUARD
 
-module hier_n1024_top #(
+module hier_d2_L8_top #(
     parameter B       = 16,
-    parameter L       = 32,
-    parameter M       = 32,
+    parameter L       = 8,
+    parameter M       = 8,
     parameter N       = L * M,            // 1024
     parameter WWIDTH  = B + 1,
     parameter LOGN    = $clog2(N),        // 10
@@ -124,8 +124,8 @@ module hier_n1024_top #(
     // Banking parameters
     localparam integer LANES     = L;     // 32
     localparam integer DEPTH     = M;     // 32
-    localparam integer LOG_LANES = 5;
-    localparam integer LOG_DEPTH = 5;
+    localparam integer LOG_LANES = 3;
+    localparam integer LOG_DEPTH = 3;
 
     // ---- Common derived signals --------------------------------------------
     // Bottom 5 bits of op_count at each pipeline tap
@@ -277,7 +277,7 @@ module hier_n1024_top #(
 
     wire [L*WWIDTH-1:0] ntt_out_pack;
     wire                ntt_valid;
-    sub_ntt32_bidir #(.B(B)) u_subntt (
+    sub_ntt8_bidir #(.B(B)) u_subntt (
         .clk      (clk),
         .rst      (rst),
         .start    (ntt_start_d1),
@@ -303,6 +303,7 @@ module hier_n1024_top #(
         reg  [LANES*WWIDTH-1:0]    NM``_wdata; \
         reg  [LANES-1:0]           NM``_we; \
         banked_mem #(.WWIDTH(WWIDTH), .LANES(LANES), .DEPTH(DEPTH), \
+                     .LOG_LANES(LOG_LANES), .LOG_DEPTH(LOG_DEPTH), \
                      .READ_LATENCY(0)) u_``NM ( \
             .clk(clk), \
             .rshift(NM``_rshift), .rpos_pack(NM``_rpos), .rdata_pack(NM``_rdata), \
@@ -730,4 +731,4 @@ module hier_n1024_top #(
 
 endmodule
 
-`endif // _HIER_N1024_TOP_GUARD
+`endif // _HIER_D2_L8_TOP_GUARD
