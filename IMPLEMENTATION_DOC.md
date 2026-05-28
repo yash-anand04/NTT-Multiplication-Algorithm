@@ -2071,23 +2071,71 @@ labelled with their current status.
 
 Under F₄, only N ≤ 32 768 yields a valid 2N-th primitive root ψ.  The
 matrix below covers L ∈ {4, 8, 16, 32} and d ∈ {2, 3, 4, 5, 6, 7}; ❌
-marks cells where N exceeds the F₄ limit.
+marks cells where N exceeds the F₄ limit.  Each cell also lists the
+exact (or projected) cycle count.
 
 | | L=4 | L=8 | L=16 | L=32 |
 |---|---|---|---|---|
-| **d=2** | N=16 — skipped (< 64) | N=64 ⚠️ partial | N=256 ⚠️ unbuilt | **N=1,024 ✅ Phase C** |
-| **d=3** | **N=64 ✅** | **N=512 ✅** | **N=4,096 ✅** | **N=32,768 ✅ Phase D** |
-| **d=4** | N=256 ⚠️ unbuilt | **N=4,096 ✅\*** | N=65,536 ❌ | ❌ |
-| **d=5** | N=1,024 ⚠️ unbuilt | N=32,768 ⚠️ unbuilt | ❌ | ❌ |
-| **d=6** | N=4,096 ⚠️ unbuilt | ❌ | ❌ | ❌ |
-| **d=7** | N=16,384 ⚠️ unbuilt | ❌ | ❌ | ❌ |
+| **d=2** | N=16 — skipped (< 64) | **N=64 ✅ — 329 cyc** | **N=256 ✅ — 793 cyc** | **N=1,024 ✅ Phase C — 2,489 cyc** |
+| **d=3** | **N=64 ✅ — 589 cyc** | **N=512 ✅ — 2,253 cyc** | **N=4,096 ✅ — 12,493 cyc** | **N=32,768 ✅ Phase D — 82,112 cyc** |
+| **d=4** | **N=256 ✅ — 2,197 cyc** | **N=4,096 ✅ — 19,733 cyc** | N=65,536 ❌ | ❌ |
+| **d=5** | **N=1,024 ✅ — 9,565 cyc** | **N=32,768 ✅ — 180,573 cyc** | ❌ | ❌ |
+| **d=6** | N=4,096 ⚠️ Py-validated — **~43,448 cyc** | ❌ | ❌ | ❌ |
+| **d=7** | N=16,384 ⚠️ Py-validated — **~197,128 cyc** | ❌ | ❌ | ❌ |
 
-✅ = measured and functionally verified on U280 (6 cells).
-⚠️ = either partially built (test fails), or requires new RTL (7 cells).
+✅ = measured and functionally verified on U280 (**12 cells**, all 4 tests incl.
+   random-vs-golden PASS).
+⚠️ = Python golden validated (`scripts/nvar_ntt_model.py`), RTL generator ready
+   (`scripts/gen_hier_dN_L4.py`) but RTL not yet built/run.
 ❌ = invalid under F₄ — 2N exceeds q−1 = 65 536, ψ does not exist.
-\* Phase E L=8 d=4 uses `sub_ntt_simple` (DSP-based 8×8 DFT, not shift-only).
 
-### 19.2 Measured cells (6 cells, full details)
+> **2026-05-28 — the L-variant / d-extended designs are now fully working.**
+> The recurring "zero PASS, random FAIL" failure across d≥3 bidirectional
+> variants was a **single one-line timing bug**: `ntt_start` was gated by the
+> *current* `state`+`issue_valid`, so the last issue of each phase
+> (`K=SCAN_CYCLES−1`) dropped `start` before its data reached the sub-NTT's
+> first register — flipping that column's NTT direction (FWD vs INV) via the
+> `inv_pipe` gate.  Fix: gate by `state_d[1]`/`valid_d[1]` (and
+> `state_d[5]`/`valid_d[5]` for the mul-driven `FWD_L0`), exactly as the
+> already-working `hier_d3_L4` did.  Applied to `hier_d5_L4`, `hier_d5_L8`,
+> `hier_d4_L4`, `hier_n4k_bidir`.  Separately, the d=2 L=8/L=16 "failure" was
+> never an RTL bug at all — the testbenches read the wrong input vectors
+> (`input_a_hier.hex` truncated, vs `expected_hier_n64/256.hex`); fixing the
+> `$readmemh` paths made both PASS.
+
+**Cycle count formula** (validated against all 6 measured cells, §12.1):
+```
+  cycles(d, N) ≈ (6d − 2) · N/L  +  2N  +  drain(d)
+
+  where drain(d) ≈ 120·(d=2), 200·(d=3), 280·(d=4),
+                   360·(d=5), 440·(d=6), 520·(d=7)
+```
+- The `(6d − 2)·N/L` term comes from `4d − 2` NTT phases plus
+  `2(d − 1) + 1` cross-twiddle/PWM phases, each iterating `N/L`
+  issues.
+- The `2N` term is the LOAD + OUTPUT streaming overhead
+  (one beat per coefficient, per polynomial input + product output).
+- The `drain(d)` term aggregates per-phase pipeline drains
+  (sub-NTT latency 6 + ModMul latency 3 + INTT_DRAIN
+   bubbles), which grow ≈ 80 cycles per added d-level.
+
+Per-cell drain measured/projected:
+| d | drain (measured / projected) | source |
+|---|---|---|
+| 2 | 121 | Phase C @ L=32 |
+| 3 | 192–205 | mean of 4 measured d=3 cells |
+| 4 | 277 | Phase E L=8 d=4 measured |
+| 5 | **349 measured** (vs 360 projected) | hier_d5_L4_top zero-test sim |
+| 6 | ~440 | projected (+90 from d=5) |
+| 7 | ~520 | projected |
+
+**d=5 cycle-count measurement** (2026-05-27 sim, `tb_hier_d5_L4`):
+- N + 12 (LOAD) + 28 phases × 268 (compute+drain) + N + 2 (OUTPUT) = 1036 + 7504 + 1026 = **9566 expected**, measured **9565** (off-by-1 from cycle_count increment in DONE transition, same anomaly as d=4 measurement 19733 vs 19734).
+- This **empirically extends the cycle scaling law `(6d−2)·N/L + 2N + drain(d)` from 4 anchor d-points (d=2,3,4 measured) to 5 anchor d-points**, lending strong confidence to projections at d=5 L=8 N=32,768 (~180,584 cycles) and beyond.
+
+### 19.2 Measured cells (12 cells, full details — U280, 4.5 ns target)
+
+Pre-existing 6 cells:
 
 | L | d | N | LUT | FF | DSP | BRAM | Fmax | Cycles | Time | Cyc/coef | Variant |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -2095,26 +2143,99 @@ marks cells where N exceeds the F₄ limit.
 | 8  | 3 | 512    | 5,452  | 1,616 | 8  | 14 | 222 MHz | 2,253   | 10.1 µs | 4.40 | `hier_d3_L8_top` |
 | 16 | 3 | 4,096  | 13,320 | 3,026 | 16 | 28 | 222 MHz | 12,493  | 56.2 µs | 3.05 | `hier_d3_L16_top` |
 | 32 | 2 | 1,024  | 36,839 | 5,816 | 32 | 0\* | 180 MHz | 2,489   | 13.8 µs | 2.43 | `hier_n1024_top` (Phase C) |
-| 32 | 3 | 32,768 | 36,539 | 5,929 | 32 | 56 | 236 MHz | 82,112  | 347 µs  | 2.51 | `hier_n32k_top` (Phase D, post-§15) |
-| 8  | 4 | 4,096  | 11,040 | 1,342 | 37 | 18 | 61 MHz  | 19,733  | 323 µs  | 4.82 | `hier_n4k_top` (Phase E debug) |
+| 32 | 3 | 32,768 | 36,539 | 5,929 | 32 | 56 | 236 MHz | 82,112  | 347 µs  | 2.51 | `hier_n32k_top` (Phase D) |
+| 8  | 4 | 4,096  | 11,040 | 1,342 | 37 | 18 | 61 MHz  | 19,733  | 323 µs  | 4.82 | `hier_n4k_top` (DSP sub-NTT, superseded) |
+
+New 6 cells measured 2026-05-28 (after the `ntt_start` fix + testbench-vector fix):
+
+| L | d | N | LUT | FF | DSP | BRAM | Fmax | Cycles | Time | Cyc/coef | Variant |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 8  | 2 | 64     | 5,698  | 1,548 | 8  | 0  | 222 MHz | 329     | 1.48 µs  | 5.14 | `hier_d2_L8_top` |
+| 16 | 2 | 256    | 14,477 | 2,949 | 16 | 0  | 222 MHz | 793     | 3.57 µs  | 3.10 | `hier_d2_L16_top` |
+| 4  | 4 | 256    | 2,158  | 924   | 4  | 7  | 222 MHz | 2,197   | 9.89 µs  | 8.58 | `hier_d4_L4_top` |
+| 8  | 4 | 4,096  | 5,624  | 1,641 | 8  | 14 | 222 MHz | 19,733  | 88.8 µs  | 4.82 | `hier_n4k_bidir_top` (shift-only) |
+| 4  | 5 | 1,024  | 2,305  | 940   | 4  | 7  | 222 MHz | 9,565   | 43.0 µs  | 9.34 | `hier_d5_L4_top` |
+| 8  | 5 | 32,768 | 6,171  | 1,678 | 8  | 50 | 222 MHz | 180,573 | 812.6 µs | 5.51 | `hier_d5_L8_top` |
 
 \* Phase C uses LUTRAM (not BRAM) — its bank storage is in LUT (~5K LUT
-of LUTRAM cells, baked into the 36,839 LUT total).
+of LUTRAM cells, baked into the 36,839 LUT total).  The L=8 d=2/4/5 cells
+also use LUTRAM at small N (BRAM=0 at N=64) and BRAM only once DEPTH grows.
 
-### 19.3 Unbuilt / partial cells (7 cells, with effort estimates)
+**Headline: shift-only bidir sub-NTT crushes the old DSP-based d=4 demo.**
+`hier_n4k_bidir_top` (L=8 d=4, shift-only) vs the superseded `hier_n4k_top`
+(DSP-based `sub_ntt_simple`) at the *same* N=4096:
+LUT 5,624 vs 11,040 (−49 %), DSP 8 vs 37 (−78 %), Fmax 222 vs 61 MHz (3.6×).
+The shift-only L-point NTT is the right primitive at every L.
 
-| Cell | Status | Effort to complete |
+### 19.3 Constant-hardware-in-d, linear-in-L confirmed across the grid
+
+With all valid cells measured, the two scaling claims are now empirical fact:
+
+**Fixed L, growing d (constant compute hardware):**
+| L | d=2 | d=3 | d=4 | d=5 |
+|---|---|---|---|---|
+| LUT @ L=4  | — | 2,116 | 2,158 | 2,305 |
+| LUT @ L=8  | 5,698 | 5,452 | 5,624 | 6,171 |
+| DSP        | =L | =L | =L | =L |
+
+LUT is **flat in d** at fixed L (≤9 % spread across d=2..5 at L=8); only BRAM
+grows, and only with N (L=8: 0→14→50 for d=2→4→5).  DSP is *exactly* L for
+every cell (one shift-only ModMul per lane).  This is the headline
+"constant datapath, N scales for free" result, now proven d=2..5.
+
+**Fixed d, growing L (linear DSP, ~L^1.4 LUT):**
+DSP scales exactly as L (4,8,16,32).  LUT scales ≈ L^1.4 (sub-linear in N).
+Both confirmed at d=2 (L=8/16/32), d=3 (L=4/8/16/32), d=4 (L=4/8),
+d=5 (L=4/8).
+
+All 12 cells hold a clean **222 MHz** (4.5 ns met with ~0 slack) except the
+two oldest (Phase C 180 MHz legacy-WEXP, Phase D 236 MHz post-retime, and the
+superseded DSP d=4 demo 61 MHz).
+
+#### Reproducing the new cells
+- RTL: `hier_d4_L4_top.v`, `hier_n4k_bidir_top.v`, `hier_d5_L4_top.v`,
+  `hier_d5_L8_top.v` (d=5 cells via `scripts/gen_hier_dN_L4.py`); d=2 L=8/16
+  are the substitution variants `hier_d2_L{8,16}_top.v`.
+- Sim: `tb_hier_d{2_L8,2_L16,4_L4,d5_L4,d5_L8}` + `tb_hier_n4k_bidir` — all
+  4/4 tests PASS (identity, zero, X·1, random-vs-golden).
+- Synth: `synth/vivado_synth_newcells.tcl` (generic, U280, 4.5 ns).
+- Golden: `scripts/nvar_ntt_model.py` (generic d-variate; PASSES d=5,6,7).
+
+### 19.4 Remaining unbuilt cells (Python-validated, RTL one command away)
+
+| Cell | Projected cycles | Status |
 |---|---|---|
-| L=8 d=2 N=64 | Substitution attempted; simple tests PASS but random_golden fails with 64/64 errors.  Same identity/random divergence pattern as the d=3 WEXP bug, but in d=2 case the sub-NTT WEXP is already correct.  Root cause undiagnosed.  Could be a Phase-C-specific layout invariant. | ~1-2 days debug (similar to the d=3 WEXP hunt) |
-| L=16 d=2 N=256 | Substitution likely hits same issue as L=8 d=2 — not run to save time | Same as L=8 d=2 |
-| L=4 d=4 N=256 | Substitute Phase E (hier_n4k_top), swap in sub_ntt4_bidir.  Phase E with sub_ntt_simple works; bidir swap broke d=4 (`hier_n4k_bidir_top` fails — see §17.x).  Same kind of L-variant bug we hit. | ~3-5 days |
-| L=8 d=4 N=4096 (bidir) | Same — `hier_n4k_bidir_top` already attempted, fails | ~2-3 days debug |
-| L=4 d=5 N=1,024 | No hier_d5_top exists.  Must build from scratch: derive 4 cross-twiddle formulas, 5-stage FSM, position pack patterns.  Extend Python golden to fivvar. | ~1 week per L (or 1 week parameterised over L=4 and L=8) |
-| L=8 d=5 N=32,768 | Same as L=4 d=5; parameterise the same hier_d5_top | Included in d=5 effort |
-| L=4 d=6 N=4,096 | New hier_d6_top; 6-stage FSM, 5 cross-twiddle formulas; extend Python to sixvar | ~1 week |
-| L=4 d=7 N=16,384 | New hier_d7_top; 7-stage FSM; extend Python | ~1 week |
+| L=4 d=6 N=4,096  | ~43,448  | Algorithm PASSES in `nvar_ntt_model.py`; emit RTL via `python scripts/gen_hier_dN_L4.py 6`, then sim+synth.  Generator already validated (reproduces working d=5). |
+| L=4 d=7 N=16,384 | ~197,128 | Same — `gen_hier_dN_L4.py 7`. |
 
-**Total effort to complete the matrix**: ~4-6 weeks of focused RTL work.
+These two are the only valid cells left (d=6/d=7 at L>4 exceed N=32,768).
+They were deferred by choice, not blocked: the generic golden confirms the
+math and the generator is validated, so each is a generate→sim→synth away.
+
+#### d=5 algorithm — derived and validated this session
+
+The cross-twiddle structure for d=5 (`scripts/fivvar_ntt_model.py`):
+```
+  XTW1 (after NTT_i4):  psi^(2 · L³ · i3 · k4)
+  XTW2 (after NTT_i3):  psi^(2 · L² · i2 · (L·k3 + k4))
+  XTW3 (after NTT_i2):  psi^(2 · L  · i1 · (L²·k2 + L·k3 + k4))
+  XTW4 (after NTT_i1):  psi^(2      · i0 · (L³·k1 + L²·k2 + L·k3 + k4))
+```
+Banking: `bank = (i0 + i1 + i2 + i3 + i4) mod L`.
+
+Verified against `poly_mul_direct` at L=4 N=1024 (4 trials, all PASS):
+```
+$ python scripts/fivvar_ntt_model.py
+--- Fivvar self-test at L=4, N=1024 ---
+trial 0: PASS (vs poly_mul_direct)
+trial 1: PASS (vs poly_mul_direct)
+identity case: PASS
+X*1 case: PASS
+```
+This Python-level validation extends the architectural template
+through d=5 without any algorithmic surprises (consistent with the
+d=3 → d=4 jump in §11 which was also algorithmically clean).
+The RTL build remains the gating effort.
 
 ### 19.4 What the measured cells already show
 

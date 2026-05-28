@@ -154,8 +154,8 @@ module tb_hier_d2_L8;
         drive_one_test("X_times_1");
 
         // --------------------- Test 4: random vs Python golden -----------
-        $readmemh("input_a_hier.hex",        in_a);
-        $readmemh("input_b_hier.hex",        in_b);
+        $readmemh("input_a_n64.hex",       in_a);
+        $readmemh("input_b_n64.hex",       in_b);
         $readmemh("expected_hier_n64.hex", exp_c);
         drive_one_test("random_golden");
 

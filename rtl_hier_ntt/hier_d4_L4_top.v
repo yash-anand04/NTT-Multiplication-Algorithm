@@ -32,15 +32,15 @@
 //   d12 : NTT+mul paths  (FWD_L0 with pre-twist, INV_L0 with post-twist).
 // =============================================================================
 
-`ifndef _HIER_N4K_BIDIR_TOP_GUARD
-`define _HIER_N4K_BIDIR_TOP_GUARD
+`ifndef _HIER_D4_L4_TOP_GUARD
+`define _HIER_D4_L4_TOP_GUARD
 
-module hier_n4k_bidir_top #(
+module hier_d4_L4_top #(
     parameter B       = 16,
-    parameter L       = 8,
+    parameter L       = 4,
     parameter N       = L * L * L * L,        // 4096
     parameter WWIDTH  = B + 1,
-    parameter LOGN    = 12,                   // $clog2(N)
+    parameter LOGN    = 8,                   // $clog2(N)
     parameter TW_BITS = LOGN + 1              // 13: psi has order 2N = 8192
 )(
     input  wire              clk,
@@ -135,39 +135,39 @@ module hier_n4k_bidir_top #(
     // -------------------------------------------------------------------------
     localparam integer LANES     = L;       // 8
     localparam integer DEPTH     = L*L*L;   // 512 entries per bank
-    localparam integer LOG_LANES = 3;
-    localparam integer LOG_DEPTH = 9;
+    localparam integer LOG_LANES = 2;
+    localparam integer LOG_DEPTH = 6;
 
     // -------------------------------------------------------------------------
     // op_count decomposition.  During compute phases (op_count in [0, L^3)):
-    //   op_a = op_count[2:0]   = "lowest" iteration index
-    //   op_b = op_count[5:3]
-    //   op_c = op_count[8:6]
+    //   op_a = op_count[1:0]   = "lowest" iteration index
+    //   op_b = op_count[3:2]
+    //   op_c = op_count[5:4]
     // Their interpretation as (i0,i1,i2,i3) depends on which axis the current
     // FSM phase is sweeping.  Convention: the bank-only axis (i0 for NTT_i1/i2/i3
     // phases) maps to op_a.  Pos-axes map to op_b, op_c.
     // -------------------------------------------------------------------------
-    wire [LOG_LANES-1:0] op_a = op_count[2:0];
-    wire [LOG_LANES-1:0] op_b = op_count[5:3];
-    wire [LOG_LANES-1:0] op_c = op_count[8:6];
+    wire [LOG_LANES-1:0] op_a = op_count[1:0];
+    wire [LOG_LANES-1:0] op_b = op_count[3:2];
+    wire [LOG_LANES-1:0] op_c = op_count[5:4];
 
     // During LOAD/OUTPUT: op_count = i0 + L*i1 + L^2*i2 + L^3*i3 (full 12-bit)
-    wire [LOG_LANES-1:0] load_i0 = op_count[2:0];
-    wire [LOG_LANES-1:0] load_i1 = op_count[5:3];
-    wire [LOG_LANES-1:0] load_i2 = op_count[8:6];
-    wire [LOG_LANES-1:0] load_i3 = op_count[11:9];
-    wire [LOG_LANES-1:0] load_bank = (load_i0 + load_i1 + load_i2 + load_i3) & 3'h7;
+    wire [LOG_LANES-1:0] load_i0 = op_count[1:0];
+    wire [LOG_LANES-1:0] load_i1 = op_count[3:2];
+    wire [LOG_LANES-1:0] load_i2 = op_count[5:4];
+    wire [LOG_LANES-1:0] load_i3 = op_count[7:6];
+    wire [LOG_LANES-1:0] load_bank = (load_i0 + load_i1 + load_i2 + load_i3) & 2'h3;
     reg  [LOG_LANES-1:0] load_bank_d1;
     always @(posedge clk) load_bank_d1 <= load_bank;
     wire [LOG_DEPTH-1:0] load_pos  = {load_i3, load_i2, load_i1};   // i1 + L*i2 + L^2*i3
 
     // Delayed LOAD writeback (write tap d5)
-    wire [LOG_LANES-1:0] load_i0_d5 = opcnt_d[5][2:0];
-    wire [LOG_LANES-1:0] load_i1_d5 = opcnt_d[5][5:3];
-    wire [LOG_LANES-1:0] load_i2_d5 = opcnt_d[5][8:6];
-    wire [LOG_LANES-1:0] load_i3_d5 = opcnt_d[5][11:9];
+    wire [LOG_LANES-1:0] load_i0_d5 = opcnt_d[5][1:0];
+    wire [LOG_LANES-1:0] load_i1_d5 = opcnt_d[5][3:2];
+    wire [LOG_LANES-1:0] load_i2_d5 = opcnt_d[5][5:4];
+    wire [LOG_LANES-1:0] load_i3_d5 = opcnt_d[5][7:6];
     wire [LOG_LANES-1:0] load_bank_d5 =
-        (load_i0_d5 + load_i1_d5 + load_i2_d5 + load_i3_d5) & 3'h7;
+        (load_i0_d5 + load_i1_d5 + load_i2_d5 + load_i3_d5) & 2'h3;
     wire [LOG_DEPTH-1:0] load_pos_d5  = {load_i3_d5, load_i2_d5, load_i1_d5};
 
     // -------------------------------------------------------------------------
@@ -180,7 +180,7 @@ module hier_n4k_bidir_top #(
     // rshift = (op_a + op_b + op_c) mod L for all NTT/XTW phases.
     // bank[k] = (rshift + k) mod L.
     // -------------------------------------------------------------------------
-    wire [LOG_LANES-1:0] rshift_op = (op_a + op_b + op_c) & 3'h7;
+    wire [LOG_LANES-1:0] rshift_op = (op_a + op_b + op_c) & 2'h3;
 
     wire [LANES*LOG_DEPTH-1:0] rpos_axis_i3_pack;
     wire [LANES*LOG_DEPTH-1:0] rpos_axis_i2_pack;
@@ -190,9 +190,9 @@ module hier_n4k_bidir_top #(
     genvar gk;
     generate
         for (gk = 0; gk < LANES; gk = gk + 1) begin : g_rpos
-            assign rpos_axis_i3_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[2:0], op_c, op_b};
-            assign rpos_axis_i2_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {op_c, gk[2:0], op_b};
-            assign rpos_axis_i1_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {op_c, op_b, gk[2:0]};
+            assign rpos_axis_i3_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[1:0], op_c, op_b};
+            assign rpos_axis_i2_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {op_c, gk[1:0], op_b};
+            assign rpos_axis_i1_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {op_c, op_b, gk[1:0]};
             assign rpos_broadcast_pack[gk*LOG_DEPTH +: LOG_DEPTH] = {op_c, op_b, op_a};
             assign rpos_zero_pack    [gk*LOG_DEPTH +: LOG_DEPTH] = {LOG_DEPTH{1'b0}};
         end
@@ -207,40 +207,40 @@ module hier_n4k_bidir_top #(
         for (gk = 0; gk < LANES; gk = gk + 1) begin : g_wpos
             // tap 5
             assign wpos_i3_d5 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {gk[2:0], opcnt_d[5][8:6], opcnt_d[5][5:3]};
+                {gk[1:0], opcnt_d[5][5:4], opcnt_d[5][3:2]};
             assign wpos_i2_d5 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[5][8:6], gk[2:0], opcnt_d[5][5:3]};
+                {opcnt_d[5][5:4], gk[1:0], opcnt_d[5][3:2]};
             assign wpos_i1_d5 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[5][8:6], opcnt_d[5][5:3], gk[2:0]};
+                {opcnt_d[5][5:4], opcnt_d[5][3:2], gk[1:0]};
             assign wpos_bc_d5 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[5][8:6], opcnt_d[5][5:3], opcnt_d[5][2:0]};
+                {opcnt_d[5][5:4], opcnt_d[5][3:2], opcnt_d[5][1:0]};
             // tap 8
             assign wpos_i3_d8 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {gk[2:0], opcnt_d[8][8:6], opcnt_d[8][5:3]};
+                {gk[1:0], opcnt_d[8][5:4], opcnt_d[8][3:2]};
             assign wpos_i2_d8 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[8][8:6], gk[2:0], opcnt_d[8][5:3]};
+                {opcnt_d[8][5:4], gk[1:0], opcnt_d[8][3:2]};
             assign wpos_i1_d8 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[8][8:6], opcnt_d[8][5:3], gk[2:0]};
+                {opcnt_d[8][5:4], opcnt_d[8][3:2], gk[1:0]};
             assign wpos_bc_d8 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[8][8:6], opcnt_d[8][5:3], opcnt_d[8][2:0]};
+                {opcnt_d[8][5:4], opcnt_d[8][3:2], opcnt_d[8][1:0]};
             // tap 12
             assign wpos_i3_d12[gk*LOG_DEPTH +: LOG_DEPTH] =
-                {gk[2:0], opcnt_d[12][8:6], opcnt_d[12][5:3]};
+                {gk[1:0], opcnt_d[12][5:4], opcnt_d[12][3:2]};
             assign wpos_i2_d12[gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[12][8:6], gk[2:0], opcnt_d[12][5:3]};
+                {opcnt_d[12][5:4], gk[1:0], opcnt_d[12][3:2]};
             assign wpos_i1_d12[gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[12][8:6], opcnt_d[12][5:3], gk[2:0]};
+                {opcnt_d[12][5:4], opcnt_d[12][3:2], gk[1:0]};
             assign wpos_bc_d12[gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[12][8:6], opcnt_d[12][5:3], opcnt_d[12][2:0]};
+                {opcnt_d[12][5:4], opcnt_d[12][3:2], opcnt_d[12][1:0]};
         end
     endgenerate
 
     wire [LOG_LANES-1:0] wshift_d5  =
-        (opcnt_d[5][2:0]  + opcnt_d[5][5:3]  + opcnt_d[5][8:6])  & 3'h7;
+        (opcnt_d[5][1:0]  + opcnt_d[5][3:2]  + opcnt_d[5][5:4])  & 2'h3;
     wire [LOG_LANES-1:0] wshift_d8  =
-        (opcnt_d[8][2:0]  + opcnt_d[8][5:3]  + opcnt_d[8][8:6])  & 3'h7;
+        (opcnt_d[8][1:0]  + opcnt_d[8][3:2]  + opcnt_d[8][5:4])  & 2'h3;
     wire [LOG_LANES-1:0] wshift_d12 =
-        (opcnt_d[12][2:0] + opcnt_d[12][5:3] + opcnt_d[12][8:6]) & 3'h7;
+        (opcnt_d[12][1:0] + opcnt_d[12][3:2] + opcnt_d[12][5:4]) & 2'h3;
 
     // -------------------------------------------------------------------------
     // Input data delay chain (for LOAD writeback at d5)
@@ -316,9 +316,9 @@ module hier_n4k_bidir_top #(
 
             // INV_L0 post-twist: mul fires 8 cycles after NTT issue.  With
             // REGISTERED=1 twiddle, idx tap shifts d8 -> d7.
-            wire [LOG_LANES-1:0] oa_d7 = opcnt_d[7][2:0];
-            wire [LOG_LANES-1:0] ob_d7 = opcnt_d[7][5:3];
-            wire [LOG_LANES-1:0] oc_d7 = opcnt_d[7][8:6];
+            wire [LOG_LANES-1:0] oa_d7 = opcnt_d[7][1:0];
+            wire [LOG_LANES-1:0] ob_d7 = opcnt_d[7][3:2];
+            wire [LOG_LANES-1:0] oc_d7 = opcnt_d[7][5:4];
             wire [TW_BITS-1:0] tw_inv_l0_idx_d7 = inv_tw_idx(
                 (oa_d7 + L*ob_d7 + L*L*oc_d7 + L*L*L*tg) % (2*N));
 
@@ -404,7 +404,7 @@ module hier_n4k_bidir_top #(
     end
 
     wire [L*WWIDTH-1:0] ntt_out_pack;
-    sub_ntt8_bidir #(.B(B)) u_subntt (
+    sub_ntt4_bidir #(.B(B)) u_subntt (
         .clk(clk), .rst(rst),
         .start(ntt_start_d1), .inverse(ntt_inverse_d1),
         .in_norm(ntt_in_reg), .out_norm(ntt_out_pack),
@@ -944,4 +944,4 @@ module hier_n4k_bidir_top #(
 
 endmodule
 
-`endif // _HIER_N4K_BIDIR_TOP_GUARD
+`endif // _HIER_D4_L4_TOP_GUARD

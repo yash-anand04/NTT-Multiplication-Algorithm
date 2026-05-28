@@ -1,47 +1,41 @@
 // =============================================================================
-// hier_n4k_top.v   (Phase E debug variant, L=8)
-// Fourvariate (d=4) hierarchical NTT polynomial multiplier.  N = L^4 = 4096.
+// hier_d5_L4_top.v
+// Five-variate (d=5) hierarchical NTT polynomial multiplier.  L=4, N=L^5=1024.
 //
-// Mirrors hier_n32k_top (d=3) but adds one more axis and one more cross-twiddle
-// phase per direction.  Used as a fast L=8 sim variant before scaling to L=32
-// (hier_n1M_top, N=10^6).
+// Extends hier_n4k_top.v (d=4) by adding one more axis and one more
+// cross-twiddle phase per direction.
 //
-// Layout: flat index i = i0 + L*i1 + L^2*i2 + L^3*i3, L = 8.
-//   bank(i0,i1,i2,i3) = (i0+i1+i2+i3) mod 8         (conflict-free)
-//   pos (i0,i1,i2,i3) = i1 + L*i2 + L^2*i3          (per-bank addr in [0,512))
+// Layout: flat index i = i0 + L*i1 + L^2*i2 + L^3*i3 + L^4*i4, L = 4.
+//   bank(i0..i4) = (i0+i1+i2+i3+i4) mod 4         (conflict-free)
+//   pos (i0..i4) = i1 + L*i2 + L^2*i3 + L^3*i4    (per-bank addr in [0,256))
 //   i0 contributes to bank only, not pos.
 //
 // Forward NTT (per polynomial):
-//   STAGE 0:  pre-twist by psi^i, NTT along i3 axis (-> k3)
-//   XTW1:     multiply by psi^(2*L^2*i2*k3)
-//   STAGE 1:  NTT along i2 axis (-> k2)
-//   XTW2:     multiply by psi^(2*L*i1*(L*k2+k3))
-//   STAGE 2:  NTT along i1 axis (-> k1)
-//   XTW3:     multiply by psi^(2*i0*(L^2*k1+L*k2+k3))
-//   STAGE 3:  NTT along i0 axis (-> k0)
+//   STAGE 0:  pre-twist by psi^i, NTT along i4 axis (-> k4)
+//   XTW1:     multiply by psi^(2*L^3*i3*k4)
+//   STAGE 1:  NTT along i3 axis (-> k3)
+//   XTW2:     multiply by psi^(2*L^2*i2*(L*k3+k4))
+//   STAGE 2:  NTT along i2 axis (-> k2)
+//   XTW3:     multiply by psi^(2*L*i1*(L^2*k2+L*k3+k4))
+//   STAGE 3:  NTT along i1 axis (-> k1)
+//   XTW4:     multiply by psi^(2*i0*(L^3*k1+L^2*k2+L*k3+k4))
+//   STAGE 4:  NTT along i0 axis (-> k0)
 // PWM: spec_a * spec_b -> prod
 // Inverse: reverse the chain (post-twist by psi^(-i) at the end).
 //
-// Storage: 4 banked_mem instances in BRAM mode (sync read).  At L=8 each
-// memory is 8 banks * 512 entries * 17 bits = ~70 Kb per memory.  Total 4 mem
-// banked storage fits in BRAM trivially.
-//
-// Pipeline taps (BRAM = +1 cycle vs Phase C):
-//   d5  : mul-only paths (PWM, XTW phases, LOAD).
-//   d8  : NTT-only paths (FWD_Lx, INV_Lx pure NTT phases).
-//   d12 : NTT+mul paths  (FWD_L0 with pre-twist, INV_L0 with post-twist).
+// FSM: 32 states.  Pipeline taps d5/d8/d12.
 // =============================================================================
 
-`ifndef _HIER_N4K_BIDIR_TOP_GUARD
-`define _HIER_N4K_BIDIR_TOP_GUARD
+`ifndef _HIER_D5_L8_TOP_GUARD
+`define _HIER_D5_L8_TOP_GUARD
 
-module hier_n4k_bidir_top #(
+module hier_d5_L8_top #(
     parameter B       = 16,
     parameter L       = 8,
-    parameter N       = L * L * L * L,        // 4096
+    parameter N       = L * L * L * L * L,    // 1024
     parameter WWIDTH  = B + 1,
-    parameter LOGN    = 12,                   // $clog2(N)
-    parameter TW_BITS = LOGN + 1              // 13: psi has order 2N = 8192
+    parameter LOGN    = 15,                   // $clog2(N)
+    parameter TW_BITS = LOGN + 1              // 11: psi has order 2N = 2048
 )(
     input  wire              clk,
     input  wire              rst,
@@ -55,43 +49,49 @@ module hier_n4k_bidir_top #(
 );
 
     // -------------------------------------------------------------------------
-    // FSM states (26 states, 5 bits)
+    // FSM states (32 states, 5 bits)
     // -------------------------------------------------------------------------
     localparam [4:0]
         ST_IDLE       = 5'd0,
         ST_LOAD       = 5'd1,
-        // --- A forward chain (7 phases) ---
-        ST_FWD_L0_A   = 5'd2,    // pre-twist + NTT along i3
+        // --- A forward chain (9 phases) ---
+        ST_FWD_L0_A   = 5'd2,    // pre-twist + NTT along i4
         ST_FWD_XTW1_A = 5'd3,
-        ST_FWD_L1_A   = 5'd4,    // NTT along i2
+        ST_FWD_L1_A   = 5'd4,    // NTT along i3
         ST_FWD_XTW2_A = 5'd5,
-        ST_FWD_L2_A   = 5'd6,    // NTT along i1
+        ST_FWD_L2_A   = 5'd6,    // NTT along i2
         ST_FWD_XTW3_A = 5'd7,
-        ST_FWD_L3_A   = 5'd8,    // NTT along i0 -> spec_a
-        // --- B forward chain (7 phases) ---
-        ST_FWD_L0_B   = 5'd9,
-        ST_FWD_XTW1_B = 5'd10,
-        ST_FWD_L1_B   = 5'd11,
-        ST_FWD_XTW2_B = 5'd12,
-        ST_FWD_L2_B   = 5'd13,
-        ST_FWD_XTW3_B = 5'd14,
-        ST_FWD_L3_B   = 5'd15,
+        ST_FWD_L3_A   = 5'd8,    // NTT along i1
+        ST_FWD_XTW4_A = 5'd9,
+        ST_FWD_L4_A   = 5'd10,   // NTT along i0 -> spec_a
+        // --- B forward chain (9 phases) ---
+        ST_FWD_L0_B   = 5'd11,
+        ST_FWD_XTW1_B = 5'd12,
+        ST_FWD_L1_B   = 5'd13,
+        ST_FWD_XTW2_B = 5'd14,
+        ST_FWD_L2_B   = 5'd15,
+        ST_FWD_XTW3_B = 5'd16,
+        ST_FWD_L3_B   = 5'd17,
+        ST_FWD_XTW4_B = 5'd18,
+        ST_FWD_L4_B   = 5'd19,
         // --- pointwise ---
-        ST_PWM        = 5'd16,
-        // --- inverse chain (7 phases) ---
-        ST_INV_L3     = 5'd17,   // INTT along k0 -> i0
-        ST_INV_XTW3   = 5'd18,
-        ST_INV_L2     = 5'd19,   // INTT along k1 -> i1
-        ST_INV_XTW2   = 5'd20,
-        ST_INV_L1     = 5'd21,   // INTT along k2 -> i2
-        ST_INV_XTW1   = 5'd22,
-        ST_INV_L0     = 5'd23,   // INTT along k3 + post-twist
-        ST_OUTPUT     = 5'd24,
-        ST_DONE       = 5'd25;
+        ST_PWM        = 5'd20,
+        // --- inverse chain (9 phases) ---
+        ST_INV_L4     = 5'd21,   // INTT along k0 -> i0
+        ST_INV_XTW4   = 5'd22,
+        ST_INV_L3     = 5'd23,   // INTT along k1 -> i1
+        ST_INV_XTW3   = 5'd24,
+        ST_INV_L2     = 5'd25,   // INTT along k2 -> i2
+        ST_INV_XTW2   = 5'd26,
+        ST_INV_L1     = 5'd27,   // INTT along k3 -> i3
+        ST_INV_XTW1   = 5'd28,
+        ST_INV_L0     = 5'd29,   // INTT along k4 + post-twist
+        ST_OUTPUT     = 5'd30,
+        ST_DONE       = 5'd31;
 
-    localparam integer SCAN_CYCLES = N / L;       // 512 issues per compute phase
+    localparam integer SCAN_CYCLES = N / L;       // 256 issues per compute phase
     localparam integer DRAIN       = 12;
-    localparam integer SCAN_LEN    = SCAN_CYCLES + DRAIN;  // 524 cycles per phase
+    localparam integer SCAN_LEN    = SCAN_CYCLES + DRAIN;  // 268 cycles per phase
 
     reg [4:0]      state;
     reg [LOGN:0]   op_count;
@@ -131,57 +131,70 @@ module hier_n4k_bidir_top #(
                                 (op_count < SCAN_CYCLES);
 
     // -------------------------------------------------------------------------
-    // Banking parameters (L=8)
+    // Banking parameters (L=4)
     // -------------------------------------------------------------------------
-    localparam integer LANES     = L;       // 8
-    localparam integer DEPTH     = L*L*L;   // 512 entries per bank
+    localparam integer LANES     = L;          // 4
+    localparam integer DEPTH     = L*L*L*L;    // 256 entries per bank
     localparam integer LOG_LANES = 3;
-    localparam integer LOG_DEPTH = 9;
+    localparam integer LOG_DEPTH = 12;
 
     // -------------------------------------------------------------------------
-    // op_count decomposition.  During compute phases (op_count in [0, L^3)):
-    //   op_a = op_count[2:0]   = "lowest" iteration index
+    // op_count decomposition during compute phases (op_count in [0, L^4)):
+    //   op_a = op_count[2:0]
     //   op_b = op_count[5:3]
     //   op_c = op_count[8:6]
-    // Their interpretation as (i0,i1,i2,i3) depends on which axis the current
-    // FSM phase is sweeping.  Convention: the bank-only axis (i0 for NTT_i1/i2/i3
-    // phases) maps to op_a.  Pos-axes map to op_b, op_c.
+    //   op_d = op_count[11:9]
+    // These four are the four non-lane axes for any phase.
     // -------------------------------------------------------------------------
     wire [LOG_LANES-1:0] op_a = op_count[2:0];
     wire [LOG_LANES-1:0] op_b = op_count[5:3];
     wire [LOG_LANES-1:0] op_c = op_count[8:6];
+    wire [LOG_LANES-1:0] op_d = op_count[11:9];
 
-    // During LOAD/OUTPUT: op_count = i0 + L*i1 + L^2*i2 + L^3*i3 (full 12-bit)
+    // During LOAD/OUTPUT: op_count = i0 + L*i1 + L^2*i2 + L^3*i3 + L^4*i4 (10-bit)
     wire [LOG_LANES-1:0] load_i0 = op_count[2:0];
     wire [LOG_LANES-1:0] load_i1 = op_count[5:3];
     wire [LOG_LANES-1:0] load_i2 = op_count[8:6];
     wire [LOG_LANES-1:0] load_i3 = op_count[11:9];
-    wire [LOG_LANES-1:0] load_bank = (load_i0 + load_i1 + load_i2 + load_i3) & 3'h7;
+    wire [LOG_LANES-1:0] load_i4 = op_count[14:12];
+    wire [LOG_LANES-1:0] load_bank =
+        (load_i0 + load_i1 + load_i2 + load_i3 + load_i4) & 3'h7;
     reg  [LOG_LANES-1:0] load_bank_d1;
     always @(posedge clk) load_bank_d1 <= load_bank;
-    wire [LOG_DEPTH-1:0] load_pos  = {load_i3, load_i2, load_i1};   // i1 + L*i2 + L^2*i3
+    // pos = i1 + L*i2 + L^2*i3 + L^3*i4 -> {i4, i3, i2, i1}
+    wire [LOG_DEPTH-1:0] load_pos  = {load_i4, load_i3, load_i2, load_i1};
 
     // Delayed LOAD writeback (write tap d5)
     wire [LOG_LANES-1:0] load_i0_d5 = opcnt_d[5][2:0];
     wire [LOG_LANES-1:0] load_i1_d5 = opcnt_d[5][5:3];
     wire [LOG_LANES-1:0] load_i2_d5 = opcnt_d[5][8:6];
     wire [LOG_LANES-1:0] load_i3_d5 = opcnt_d[5][11:9];
+    wire [LOG_LANES-1:0] load_i4_d5 = opcnt_d[5][14:12];
     wire [LOG_LANES-1:0] load_bank_d5 =
-        (load_i0_d5 + load_i1_d5 + load_i2_d5 + load_i3_d5) & 3'h7;
-    wire [LOG_DEPTH-1:0] load_pos_d5  = {load_i3_d5, load_i2_d5, load_i1_d5};
+        (load_i0_d5 + load_i1_d5 + load_i2_d5 + load_i3_d5 + load_i4_d5) & 3'h7;
+    wire [LOG_DEPTH-1:0] load_pos_d5  =
+        {load_i4_d5, load_i3_d5, load_i2_d5, load_i1_d5};
 
     // -------------------------------------------------------------------------
     // Read-side rpos packs.  Pattern depends on which axis is "lane".
-    //   axis_i3 (lane=i3):       pos[k] = op_b + L*op_c + L^2*k
-    //   axis_i2 (lane=i2):       pos[k] = op_b + L*k    + L^2*op_c
-    //   axis_i1 (lane=i1):       pos[k] = k    + L*op_b + L^2*op_c
-    //   broadcast/axis_i0:       pos[k] = op_a + L*op_b + L^2*op_c   (k -> bank only)
+    //   axis_i4 (lane=i4): pos[k] = op_b + L*op_c + L^2*op_d + L^3*k
+    //                              = {k, op_d, op_c, op_b}    (i0=op_a, i1=op_b, i2=op_c, i3=op_d, i4=k)
+    //   axis_i3 (lane=i3): pos[k] = op_b + L*op_c + L^2*k    + L^3*op_d
+    //                              = {op_d, k, op_c, op_b}    (i0=op_a, i1=op_b, i2=op_c, i3=k, i4=op_d)
+    //   axis_i2 (lane=i2): pos[k] = op_b + L*k    + L^2*op_c + L^3*op_d
+    //                              = {op_d, op_c, k, op_b}    (i0=op_a, i1=op_b, i2=k, i3=op_c, i4=op_d)
+    //   axis_i1 (lane=i1): pos[k] = k    + L*op_b + L^2*op_c + L^3*op_d
+    //                              = {op_d, op_c, op_b, k}    (i0=op_a, i1=k, i2=op_b, i3=op_c, i4=op_d)
+    //   broadcast (lane=i0):
+    //     pos[k]=op_a+L*op_b+L^2*op_c+L^3*op_d   (k -> bank only)
+    //                              = {op_d, op_c, op_b, op_a} (i0=k, i1=op_a, i2=op_b, i3=op_c, i4=op_d)
     //
-    // rshift = (op_a + op_b + op_c) mod L for all NTT/XTW phases.
+    // rshift = (op_a + op_b + op_c + op_d) mod L for all NTT/XTW phases.
     // bank[k] = (rshift + k) mod L.
     // -------------------------------------------------------------------------
-    wire [LOG_LANES-1:0] rshift_op = (op_a + op_b + op_c) & 3'h7;
+    wire [LOG_LANES-1:0] rshift_op = (op_a + op_b + op_c + op_d) & 3'h7;
 
+    wire [LANES*LOG_DEPTH-1:0] rpos_axis_i4_pack;
     wire [LANES*LOG_DEPTH-1:0] rpos_axis_i3_pack;
     wire [LANES*LOG_DEPTH-1:0] rpos_axis_i2_pack;
     wire [LANES*LOG_DEPTH-1:0] rpos_axis_i1_pack;
@@ -190,15 +203,22 @@ module hier_n4k_bidir_top #(
     genvar gk;
     generate
         for (gk = 0; gk < LANES; gk = gk + 1) begin : g_rpos
-            assign rpos_axis_i3_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {gk[2:0], op_c, op_b};
-            assign rpos_axis_i2_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {op_c, gk[2:0], op_b};
-            assign rpos_axis_i1_pack [gk*LOG_DEPTH +: LOG_DEPTH] = {op_c, op_b, gk[2:0]};
-            assign rpos_broadcast_pack[gk*LOG_DEPTH +: LOG_DEPTH] = {op_c, op_b, op_a};
+            assign rpos_axis_i4_pack [gk*LOG_DEPTH +: LOG_DEPTH] =
+                {gk[2:0], op_d, op_c, op_b};
+            assign rpos_axis_i3_pack [gk*LOG_DEPTH +: LOG_DEPTH] =
+                {op_d, gk[2:0], op_c, op_b};
+            assign rpos_axis_i2_pack [gk*LOG_DEPTH +: LOG_DEPTH] =
+                {op_d, op_c, gk[2:0], op_b};
+            assign rpos_axis_i1_pack [gk*LOG_DEPTH +: LOG_DEPTH] =
+                {op_d, op_c, op_b, gk[2:0]};
+            assign rpos_broadcast_pack[gk*LOG_DEPTH +: LOG_DEPTH] =
+                {op_d, op_c, op_b, op_a};
             assign rpos_zero_pack    [gk*LOG_DEPTH +: LOG_DEPTH] = {LOG_DEPTH{1'b0}};
         end
     endgenerate
 
-    // Write-side: same patterns at delayed taps
+    // Write-side: same patterns at delayed taps (d5, d8, d12)
+    wire [LANES*LOG_DEPTH-1:0] wpos_i4_d5,  wpos_i4_d8,  wpos_i4_d12;
     wire [LANES*LOG_DEPTH-1:0] wpos_i3_d5,  wpos_i3_d8,  wpos_i3_d12;
     wire [LANES*LOG_DEPTH-1:0] wpos_i2_d5,  wpos_i2_d8,  wpos_i2_d12;
     wire [LANES*LOG_DEPTH-1:0] wpos_i1_d5,  wpos_i1_d8,  wpos_i1_d12;
@@ -206,41 +226,47 @@ module hier_n4k_bidir_top #(
     generate
         for (gk = 0; gk < LANES; gk = gk + 1) begin : g_wpos
             // tap 5
+            assign wpos_i4_d5 [gk*LOG_DEPTH +: LOG_DEPTH] =
+                {gk[2:0], opcnt_d[5][11:9], opcnt_d[5][8:6], opcnt_d[5][5:3]};
             assign wpos_i3_d5 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {gk[2:0], opcnt_d[5][8:6], opcnt_d[5][5:3]};
+                {opcnt_d[5][11:9], gk[2:0], opcnt_d[5][8:6], opcnt_d[5][5:3]};
             assign wpos_i2_d5 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[5][8:6], gk[2:0], opcnt_d[5][5:3]};
+                {opcnt_d[5][11:9], opcnt_d[5][8:6], gk[2:0], opcnt_d[5][5:3]};
             assign wpos_i1_d5 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[5][8:6], opcnt_d[5][5:3], gk[2:0]};
+                {opcnt_d[5][11:9], opcnt_d[5][8:6], opcnt_d[5][5:3], gk[2:0]};
             assign wpos_bc_d5 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[5][8:6], opcnt_d[5][5:3], opcnt_d[5][2:0]};
+                {opcnt_d[5][11:9], opcnt_d[5][8:6], opcnt_d[5][5:3], opcnt_d[5][2:0]};
             // tap 8
+            assign wpos_i4_d8 [gk*LOG_DEPTH +: LOG_DEPTH] =
+                {gk[2:0], opcnt_d[8][11:9], opcnt_d[8][8:6], opcnt_d[8][5:3]};
             assign wpos_i3_d8 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {gk[2:0], opcnt_d[8][8:6], opcnt_d[8][5:3]};
+                {opcnt_d[8][11:9], gk[2:0], opcnt_d[8][8:6], opcnt_d[8][5:3]};
             assign wpos_i2_d8 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[8][8:6], gk[2:0], opcnt_d[8][5:3]};
+                {opcnt_d[8][11:9], opcnt_d[8][8:6], gk[2:0], opcnt_d[8][5:3]};
             assign wpos_i1_d8 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[8][8:6], opcnt_d[8][5:3], gk[2:0]};
+                {opcnt_d[8][11:9], opcnt_d[8][8:6], opcnt_d[8][5:3], gk[2:0]};
             assign wpos_bc_d8 [gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[8][8:6], opcnt_d[8][5:3], opcnt_d[8][2:0]};
+                {opcnt_d[8][11:9], opcnt_d[8][8:6], opcnt_d[8][5:3], opcnt_d[8][2:0]};
             // tap 12
+            assign wpos_i4_d12[gk*LOG_DEPTH +: LOG_DEPTH] =
+                {gk[2:0], opcnt_d[12][11:9], opcnt_d[12][8:6], opcnt_d[12][5:3]};
             assign wpos_i3_d12[gk*LOG_DEPTH +: LOG_DEPTH] =
-                {gk[2:0], opcnt_d[12][8:6], opcnt_d[12][5:3]};
+                {opcnt_d[12][11:9], gk[2:0], opcnt_d[12][8:6], opcnt_d[12][5:3]};
             assign wpos_i2_d12[gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[12][8:6], gk[2:0], opcnt_d[12][5:3]};
+                {opcnt_d[12][11:9], opcnt_d[12][8:6], gk[2:0], opcnt_d[12][5:3]};
             assign wpos_i1_d12[gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[12][8:6], opcnt_d[12][5:3], gk[2:0]};
+                {opcnt_d[12][11:9], opcnt_d[12][8:6], opcnt_d[12][5:3], gk[2:0]};
             assign wpos_bc_d12[gk*LOG_DEPTH +: LOG_DEPTH] =
-                {opcnt_d[12][8:6], opcnt_d[12][5:3], opcnt_d[12][2:0]};
+                {opcnt_d[12][11:9], opcnt_d[12][8:6], opcnt_d[12][5:3], opcnt_d[12][2:0]};
         end
     endgenerate
 
     wire [LOG_LANES-1:0] wshift_d5  =
-        (opcnt_d[5][2:0]  + opcnt_d[5][5:3]  + opcnt_d[5][8:6])  & 3'h7;
+        (opcnt_d[5][2:0]  + opcnt_d[5][5:3]  + opcnt_d[5][8:6]  + opcnt_d[5][11:9])  & 3'h7;
     wire [LOG_LANES-1:0] wshift_d8  =
-        (opcnt_d[8][2:0]  + opcnt_d[8][5:3]  + opcnt_d[8][8:6])  & 3'h7;
+        (opcnt_d[8][2:0]  + opcnt_d[8][5:3]  + opcnt_d[8][8:6]  + opcnt_d[8][11:9])  & 3'h7;
     wire [LOG_LANES-1:0] wshift_d12 =
-        (opcnt_d[12][2:0] + opcnt_d[12][5:3] + opcnt_d[12][8:6]) & 3'h7;
+        (opcnt_d[12][2:0] + opcnt_d[12][5:3] + opcnt_d[12][8:6] + opcnt_d[12][11:9]) & 3'h7;
 
     // -------------------------------------------------------------------------
     // Input data delay chain (for LOAD writeback at d5)
@@ -258,7 +284,7 @@ module hier_n4k_bidir_top #(
     end
 
     // -------------------------------------------------------------------------
-    // Mul array (8 lanes for L=8)
+    // Mul array (4 lanes for L=4)
     // -------------------------------------------------------------------------
     reg  [L*WWIDTH-1:0]  mul_a_pack;
     reg  [L*WWIDTH-1:0]  mul_b_pack;
@@ -267,21 +293,22 @@ module hier_n4k_bidir_top #(
     wire [L*TW_BITS-1:0] tw_idx_pack;
 
     // -------------------------------------------------------------------------
-    // Per-lane twiddle indices.  d=4 formulas (from fourvar_ntt_model.py):
-    //   FWD_L0 pre-twist:       psi^(i0 + L*i1 + L^2*i2 + L^3*i3) at lane=i3
-    //                             = psi^(op_a + L*op_b + L^2*op_c + L^3*tg)
-    //   FWD_XTW1 (lane=k3=tg):  psi^(2*L^2 * i2 * k3) = psi^(2L^2 * op_c * tg)
-    //   FWD_XTW2 (lane=i1=tg):  psi^(2*L * i1 * (L*k2+k3))
-    //                             = psi^(2L * tg * (L*op_b + op_c))
-    //   FWD_XTW3 (lane=i0=tg):  psi^(2 * i0 * (L^2*k1+L*k2+k3))
-    //                             = psi^(2 * tg * (L^2*op_a + L*op_b + op_c))
-    //   INV_L0 post-twist:      inv of FWD_L0 idx, but mul fires 8 cycles AFTER
-    //                            NTT issue -> use opcnt_d[7] (REGISTERED twiddle
-    //                            adds 1 cycle, so tap-shift d8 -> d7).
-    //   INV_XTW1/2/3: inverses of the corresponding FWD formulas.
-    //
-    // Twiddle ROMs are REGISTERED=1 (1-cycle BRAM read).  Idx uses CURRENT
-    // op_count / state for most phases; INV_L0 uses opcnt_d[7]/state_d[7].
+    // Per-lane twiddle indices.  d=5 formulas (from fivvar_ntt_model.py):
+    //   FWD_L0 pre-twist:    psi^(i0 + L*i1 + L^2*i2 + L^3*i3 + L^4*i4)
+    //                          at lane=i4
+    //                          = psi^(op_a + L*op_b + L^2*op_c + L^3*op_d + L^4*tg)
+    //   FWD_XTW1 (lane=k4):  psi^(2*L^3 * i3 * k4) = psi^(2L^3 * op_d * tg)
+    //   FWD_XTW2 (lane=i2):  psi^(2*L^2 * i2 * (L*k3 + k4))
+    //                          = psi^(2*L^2 * tg * (L*op_c + op_d))
+    //                          where op_a=i0, op_b=i1, op_c=k3, op_d=k4
+    //   FWD_XTW3 (lane=i1):  psi^(2*L * i1 * (L^2*k2 + L*k3 + k4))
+    //                          = psi^(2*L * tg * (L^2*op_b + L*op_c + op_d))
+    //                          where op_a=i0, op_b=k2, op_c=k3, op_d=k4
+    //   FWD_XTW4 (lane=i0):  psi^(2 * i0 * (L^3*k1 + L^2*k2 + L*k3 + k4))
+    //                          = psi^(2 * tg * (L^3*op_a + L^2*op_b + L*op_c + op_d))
+    //                          where op_a=k1, op_b=k2, op_c=k3, op_d=k4
+    //   INV_L0 post-twist:   inv of FWD_L0 idx, at d7 tap.
+    //   INV_XTW1/2/3/4:      inverses of the corresponding FWD formulas.
     // -------------------------------------------------------------------------
     function [TW_BITS-1:0] inv_tw_idx;
         input [TW_BITS-1:0] idx;
@@ -296,54 +323,59 @@ module hier_n4k_bidir_top #(
             wire [LOG_LANES-1:0] oa_d0 = op_a;
             wire [LOG_LANES-1:0] ob_d0 = op_b;
             wire [LOG_LANES-1:0] oc_d0 = op_c;
+            wire [LOG_LANES-1:0] od_d0 = op_d;
 
-            // FWD_L0: pre-twist by psi^(i0 + L*i1 + L^2*i2 + L^3*i3), lane=i3
+            // FWD_L0 pre-twist: psi^(i0 + L*i1 + L^2*i2 + L^3*i3 + L^4*i4),
+            //   lane=i4
             wire [TW_BITS-1:0] tw_fwd_l0_idx =
-                (oa_d0 + L*ob_d0 + L*L*oc_d0 + L*L*L*tg) % (2*N);
+                (oa_d0 + L*ob_d0 + L*L*oc_d0 + L*L*L*od_d0 + L*L*L*L*tg) % (2*N);
 
-            // FWD_XTW1: psi^(2 * L^2 * i2 * k3), lane=k3, op_c=i2
+            // FWD_XTW1: psi^(2 * L^3 * i3 * k4), lane=k4, op_d=i3
             wire [TW_BITS-1:0] tw_xtw1_idx =
-                (2 * L * L * oc_d0 * tg) % (2*N);
+                (2 * L*L*L * od_d0 * tg) % (2*N);
 
-            // FWD_XTW2: psi^(2 * L * i1 * (L*k2+k3)), lane=i1, op_b=k2, op_c=k3
+            // FWD_XTW2: psi^(2 * L^2 * i2 * (L*k3 + k4)), lane=i2,
+            //          op_c=k3, op_d=k4
             wire [TW_BITS-1:0] tw_xtw2_idx =
-                (2 * L * tg * (L*ob_d0 + oc_d0)) % (2*N);
+                (2 * L*L * tg * (L*oc_d0 + od_d0)) % (2*N);
 
-            // FWD_XTW3: psi^(2 * i0 * (L^2*k1 + L*k2 + k3)), lane=i0,
-            //          op_a=k1, op_b=k2, op_c=k3
+            // FWD_XTW3: psi^(2 * L * i1 * (L^2*k2 + L*k3 + k4)), lane=i1,
+            //          op_b=k2, op_c=k3, op_d=k4
             wire [TW_BITS-1:0] tw_xtw3_idx =
-                (2 * tg * (L*L*oa_d0 + L*ob_d0 + oc_d0)) % (2*N);
+                (2 * L * tg * (L*L*ob_d0 + L*oc_d0 + od_d0)) % (2*N);
+
+            // FWD_XTW4: psi^(2 * i0 * (L^3*k1 + L^2*k2 + L*k3 + k4)), lane=i0,
+            //          op_a=k1, op_b=k2, op_c=k3, op_d=k4
+            wire [TW_BITS-1:0] tw_xtw4_idx =
+                (2 * tg * (L*L*L*oa_d0 + L*L*ob_d0 + L*oc_d0 + od_d0)) % (2*N);
 
             // INV_L0 post-twist: mul fires 8 cycles after NTT issue.  With
             // REGISTERED=1 twiddle, idx tap shifts d8 -> d7.
             wire [LOG_LANES-1:0] oa_d7 = opcnt_d[7][2:0];
             wire [LOG_LANES-1:0] ob_d7 = opcnt_d[7][5:3];
             wire [LOG_LANES-1:0] oc_d7 = opcnt_d[7][8:6];
+            wire [LOG_LANES-1:0] od_d7 = opcnt_d[7][11:9];
             wire [TW_BITS-1:0] tw_inv_l0_idx_d7 = inv_tw_idx(
-                (oa_d7 + L*ob_d7 + L*L*oc_d7 + L*L*L*tg) % (2*N));
+                (oa_d7 + L*ob_d7 + L*L*oc_d7 + L*L*L*od_d7 + L*L*L*L*tg) % (2*N));
 
-            // INV_XTW1: inv(FWD_XTW1) at lane=k3=tg (same iteration as FWD)
+            // INV_XTW{1,2,3,4}: same iteration as the corresponding FWD phase,
+            // just inverse exponent.
             wire [TW_BITS-1:0] tw_inv_xtw1_idx = inv_tw_idx(tw_xtw1_idx);
-
-            // INV_XTW2: inverse iterates with different (lane, op) mapping in
-            // d=3 (lane was reassigned).  For d=4 the inverse iteration matches
-            // the forward iteration (lane=i1 in both FWD_XTW2 and INV_XTW2),
-            // so the formula is just the inverse of FWD_XTW2.
             wire [TW_BITS-1:0] tw_inv_xtw2_idx = inv_tw_idx(tw_xtw2_idx);
-
-            // INV_XTW3: lane=i0 (just-promoted from k0).  After INV_L3 the data
-            // is at broadcast pos with (op_a, op_b, op_c) = (k1, k2, k3).
             wire [TW_BITS-1:0] tw_inv_xtw3_idx = inv_tw_idx(tw_xtw3_idx);
+            wire [TW_BITS-1:0] tw_inv_xtw4_idx = inv_tw_idx(tw_xtw4_idx);
 
             assign tw_idx_pack[tg*TW_BITS +: TW_BITS] =
-                (state_d[7] == ST_INV_L0)                                        ? tw_inv_l0_idx_d7 :
-                ((state == ST_FWD_L0_A) || (state == ST_FWD_L0_B))               ? tw_fwd_l0_idx :
-                ((state == ST_FWD_XTW1_A) || (state == ST_FWD_XTW1_B))           ? tw_xtw1_idx :
-                ((state == ST_FWD_XTW2_A) || (state == ST_FWD_XTW2_B))           ? tw_xtw2_idx :
-                ((state == ST_FWD_XTW3_A) || (state == ST_FWD_XTW3_B))           ? tw_xtw3_idx :
-                (state == ST_INV_XTW3)                                           ? tw_inv_xtw3_idx :
-                (state == ST_INV_XTW2)                                           ? tw_inv_xtw2_idx :
-                (state == ST_INV_XTW1)                                           ? tw_inv_xtw1_idx :
+                (state_d[7] == ST_INV_L0)                                          ? tw_inv_l0_idx_d7 :
+                ((state == ST_FWD_L0_A)   || (state == ST_FWD_L0_B))               ? tw_fwd_l0_idx :
+                ((state == ST_FWD_XTW1_A) || (state == ST_FWD_XTW1_B))             ? tw_xtw1_idx :
+                ((state == ST_FWD_XTW2_A) || (state == ST_FWD_XTW2_B))             ? tw_xtw2_idx :
+                ((state == ST_FWD_XTW3_A) || (state == ST_FWD_XTW3_B))             ? tw_xtw3_idx :
+                ((state == ST_FWD_XTW4_A) || (state == ST_FWD_XTW4_B))             ? tw_xtw4_idx :
+                (state == ST_INV_XTW4)                                             ? tw_inv_xtw4_idx :
+                (state == ST_INV_XTW3)                                             ? tw_inv_xtw3_idx :
+                (state == ST_INV_XTW2)                                             ? tw_inv_xtw2_idx :
+                (state == ST_INV_XTW1)                                             ? tw_inv_xtw1_idx :
                 {TW_BITS{1'b0}};
 
             twiddle_gen #(.B(B), .LOGN(LOGN), .REGISTERED(1)) u_tw (
@@ -366,8 +398,7 @@ module hier_n4k_bidir_top #(
     endgenerate
 
     // -------------------------------------------------------------------------
-    // Shared sub-NTT.  Uses sub_ntt_simple (L=8 module, bidirectional, 6-cycle
-    // latency identical to sub_ntt32 — pipeline taps stay d5/d8/d12).
+    // Shared sub-NTT.  Uses sub_ntt8_bidir (L=4, 6-cycle latency via padding).
     // -------------------------------------------------------------------------
     reg [L*WWIDTH-1:0] ntt_in_pack;
     reg [L*WWIDTH-1:0] ntt_in_reg;
@@ -380,12 +411,14 @@ module hier_n4k_bidir_top #(
         ntt_inverse_d1 <= ntt_inverse;
     end
 
-    // ntt_start uses state_d[1]/valid_d[1] (and state_d[5]/valid_d[5] for the
-    // FWD_L0 mul-driven path) so start aligns with when the data actually
-    // reaches the sub-NTT's first register stage.  Using current `state`
-    // causes the LAST issue (K=SCAN_CYCLES-1) of each phase to drop start
-    // before its data enters the sub-NTT, silently flipping the NTT direction
-    // (FWD vs INV) via the inv_pipe gating in sub_ntt*_bidir.  See §17.6 fix.
+    // ntt_start uses state_d[1]/valid_d[1] instead of current state, so the
+    // start signal aligns with when the data actually reaches the sub-NTT's
+    // first register stage.  Using `state` directly causes the LAST issue
+    // (K=SCAN_CYCLES-1) of each phase to drop start before its data enters
+    // the sub-NTT, which silently flips the NTT direction (FWD vs INV mode)
+    // for that iteration via the inv_pipe gating in sub_ntt{4,8,16,32}_bidir.
+    // For FWD_L0_*, the data comes via the multiplier (5-cycle latency from
+    // read), so we use state_d[5] gated by valid_d[5].
     always @(*) begin
         ntt_start = 1'b0;
         ntt_inverse = 1'b0;
@@ -394,8 +427,9 @@ module hier_n4k_bidir_top #(
         else case (state_d[1])
             ST_FWD_L1_A, ST_FWD_L1_B,
             ST_FWD_L2_A, ST_FWD_L2_B,
-            ST_FWD_L3_A, ST_FWD_L3_B: ntt_start = valid_d[1];
-            ST_INV_L3, ST_INV_L2, ST_INV_L1, ST_INV_L0: begin
+            ST_FWD_L3_A, ST_FWD_L3_B,
+            ST_FWD_L4_A, ST_FWD_L4_B: ntt_start = valid_d[1];
+            ST_INV_L4, ST_INV_L3, ST_INV_L2, ST_INV_L1, ST_INV_L0: begin
                 ntt_start   = valid_d[1];
                 ntt_inverse = 1'b1;
             end
@@ -412,7 +446,8 @@ module hier_n4k_bidir_top #(
     );
 
     // =========================================================================
-    // 4 banked memories (BRAM-backed, 8 banks * 512 entries * 17 bits)
+    // 3 banked memories (BRAM-backed): mem_a, mem_b, mem_scratch
+    // (mem_work + mem_trans consolidated into mem_scratch as in Phase E.1)
     // =========================================================================
     `define BMEM_DECL(NM) \
         wire [LANES*WWIDTH-1:0]    NM``_rdata; \
@@ -434,57 +469,53 @@ module hier_n4k_bidir_top #(
     `BMEM_DECL(mem_a)
     `BMEM_DECL(mem_b)
     `BMEM_DECL(mem_scratch)
-    // Note: mem_work + mem_trans consolidated into mem_scratch (Phase E.1
-    // optimisation).  Each scratch-using phase reads from mem_scratch and
-    // writes back in-place (read pattern == write pattern within a phase).
-    // Cross-phase R/W race is avoided by the existing 12-cycle drain: phase X
-    // last write commits at SCAN_CYCLES+11 (d12 tap); phase X+1 first read at
-    // SCAN_LEN = SCAN_CYCLES+12.  Saves 256 URAMs vs the 4-mem layout.
 
     wire [LANES*WWIDTH-1:0] raw_a_rdata   = mem_a_rdata;
     wire [LANES*WWIDTH-1:0] raw_b_rdata   = mem_b_rdata;
     wire [LANES*WWIDTH-1:0] scratch_rdata = mem_scratch_rdata;
 
-    function [LANES*WWIDTH-1:0] broadcast17;
+    function [LANES*WWIDTH-1:0] broadcastN;
         input [WWIDTH-1:0] v;
         integer bi;
         begin
-            broadcast17 = {LANES*WWIDTH{1'b0}};
+            broadcastN = {LANES*WWIDTH{1'b0}};
             for (bi = 0; bi < LANES; bi = bi + 1)
-                broadcast17[bi*WWIDTH +: WWIDTH] = v;
+                broadcastN[bi*WWIDTH +: WWIDTH] = v;
         end
     endfunction
 
     // =========================================================================
-    // PER-MEMORY DRIVER LOGIC
-    //
-    // Phase plan (a chain shown; b chain identical with mem_a -> mem_b for the
-    // initial LOAD/L0 read; intermediate work/trans alternate the same way):
-    //   LOAD       : mem_a (write single cell), mem_b (write single cell)
-    //   FWD_L0_A   : read mem_a (axis_i3), mul+NTT -> write mem_work (axis_i3 d12)
-    //   FWD_XTW1_A : read mem_work (axis_i3), mul -> write mem_trans (axis_i3 d5)
-    //   FWD_L1_A   : read mem_trans (axis_i2), NTT -> write mem_work (axis_i2 d8)
-    //   FWD_XTW2_A : read mem_work (axis_i1), mul -> write mem_trans (axis_i1 d5)
-    //   FWD_L2_A   : read mem_trans (axis_i1), NTT -> write mem_work (axis_i1 d8)
-    //   FWD_XTW3_A : read mem_work (broadcast), mul -> write mem_trans (bc d5)
-    //   FWD_L3_A   : read mem_trans (broadcast), NTT -> write mem_a (bc d8) [spec_a]
-    //   ... B chain identical with mem_b in place of mem_a
-    //   PWM        : read mem_a + mem_b (bc), mul -> write mem_a (bc d5) [prod]
-    //   INV_L3     : read mem_a (bc), NTT -> write mem_work (bc d8)
-    //   INV_XTW3   : read mem_work (bc), mul -> write mem_trans (bc d5)
-    //   INV_L2     : read mem_trans (axis_i1), NTT -> write mem_work (axis_i1 d8)
-    //   INV_XTW2   : read mem_work (axis_i1), mul -> write mem_trans (axis_i1 d5)
-    //   INV_L1     : read mem_trans (axis_i2), NTT -> write mem_work (axis_i2 d8)
-    //   INV_XTW1   : read mem_work (axis_i2), mul -> write mem_trans (axis_i2 d5)
-    //   INV_L0     : read mem_trans (axis_i3), NTT+mul -> write mem_a (axis_i3 d12)
-    //   OUTPUT     : read mem_a, single cell out
+    // Phase plan (a chain shown; b chain identical pattern; scratch alternates
+    // role of mem_work/mem_trans like Phase E.1):
+    //   LOAD       : write mem_a, mem_b
+    //   FWD_L0_A   : read mem_a (axis_i4), mul+NTT     -> mem_scratch (i4 d12)
+    //   FWD_XTW1_A : read mem_scratch (axis_i4), mul   -> mem_scratch (i4 d5)
+    //   FWD_L1_A   : read mem_scratch (axis_i3), NTT   -> mem_scratch (i3 d8)
+    //   FWD_XTW2_A : read mem_scratch (axis_i2), mul   -> mem_scratch (i2 d5)
+    //   FWD_L2_A   : read mem_scratch (axis_i2), NTT   -> mem_scratch (i2 d8)
+    //   FWD_XTW3_A : read mem_scratch (axis_i1), mul   -> mem_scratch (i1 d5)
+    //   FWD_L3_A   : read mem_scratch (axis_i1), NTT   -> mem_scratch (i1 d8)
+    //   FWD_XTW4_A : read mem_scratch (broadcast), mul -> mem_scratch (bc d5)
+    //   FWD_L4_A   : read mem_scratch (broadcast), NTT -> mem_a (bc d8)
+    //   ... B chain identical with mem_b
+    //   PWM        : read mem_a + mem_b (bc), mul      -> mem_a (bc d5)
+    //   INV_L4     : read mem_a (bc), NTT              -> mem_scratch (bc d8)
+    //   INV_XTW4   : read mem_scratch (bc), mul        -> mem_scratch (bc d5)
+    //   INV_L3     : read mem_scratch (axis_i1), NTT   -> mem_scratch (i1 d8)
+    //   INV_XTW3   : read mem_scratch (axis_i1), mul   -> mem_scratch (i1 d5)
+    //   INV_L2     : read mem_scratch (axis_i2), NTT   -> mem_scratch (i2 d8)
+    //   INV_XTW2   : read mem_scratch (axis_i2), mul   -> mem_scratch (i2 d5)
+    //   INV_L1     : read mem_scratch (axis_i3), NTT   -> mem_scratch (i3 d8)
+    //   INV_XTW1   : read mem_scratch (axis_i3), mul   -> mem_scratch (i3 d5)
+    //   INV_L0     : read mem_scratch (axis_i4), NTT+mul -> mem_a (i4 d12)
+    //   OUTPUT     : read mem_a
     // =========================================================================
 
     // ---- mem_a -------------------------------------------------------------
     always @(*) begin
-        mem_a_rshift = 3'd0;
+        mem_a_rshift = 2'd0;
         mem_a_rpos   = rpos_zero_pack;
-        mem_a_wshift = 3'd0;
+        mem_a_wshift = 2'd0;
         mem_a_wpos   = rpos_zero_pack;
         mem_a_wdata  = {LANES*WWIDTH{1'b0}};
         mem_a_we     = {LANES{1'b0}};
@@ -492,32 +523,32 @@ module hier_n4k_bidir_top #(
         case (state)
             ST_FWD_L0_A: begin
                 mem_a_rshift = rshift_op;
-                mem_a_rpos   = rpos_axis_i3_pack;
+                mem_a_rpos   = rpos_axis_i4_pack;
             end
             ST_PWM: begin
                 mem_a_rshift = rshift_op;
                 mem_a_rpos   = rpos_broadcast_pack;
             end
-            ST_INV_L3: begin
+            ST_INV_L4: begin
                 mem_a_rshift = rshift_op;
                 mem_a_rpos   = rpos_broadcast_pack;
             end
             ST_OUTPUT: begin
-                mem_a_rshift = 3'd0;
+                mem_a_rshift = 2'd0;
                 mem_a_rpos[load_bank*LOG_DEPTH +: LOG_DEPTH] = load_pos;
             end
             default: ;
         endcase
 
-        // INV_L0 final write -> mem_a (result)  (d12 = mul+NTT tap)
+        // INV_L0 final write -> mem_a (d12 = mul+NTT tap, axis_i4 pos)
         if (state_d[12] == ST_INV_L0 && valid_d[12]) begin
             mem_a_wshift = wshift_d12;
-            mem_a_wpos   = wpos_i3_d12;
+            mem_a_wpos   = wpos_i4_d12;
             mem_a_wdata  = mul_out_pack;
             mem_a_we     = {LANES{1'b1}};
         end
-        // FWD_L3_A final NTT -> mem_a (spec_a)  (d8 = NTT tap, broadcast pos)
-        else if (state_d[8] == ST_FWD_L3_A && valid_d[8]) begin
+        // FWD_L4_A final NTT -> mem_a (spec_a) (d8 = NTT tap, broadcast pos)
+        else if (state_d[8] == ST_FWD_L4_A && valid_d[8]) begin
             mem_a_wshift = wshift_d8;
             mem_a_wpos   = wpos_bc_d8;
             mem_a_wdata  = ntt_out_pack;
@@ -533,16 +564,16 @@ module hier_n4k_bidir_top #(
         // LOAD: single-cell write via load_bank_d5
         else if (state_d[5] == ST_LOAD && valid_d[5]) begin
             mem_a_wpos[load_bank_d5*LOG_DEPTH +: LOG_DEPTH] = load_pos_d5;
-            mem_a_wdata                                    = broadcast17(in_a_d[5]);
+            mem_a_wdata                                    = broadcastN(in_a_d[5]);
             mem_a_we[load_bank_d5]                         = 1'b1;
         end
     end
 
     // ---- mem_b -------------------------------------------------------------
     always @(*) begin
-        mem_b_rshift = 3'd0;
+        mem_b_rshift = 2'd0;
         mem_b_rpos   = rpos_zero_pack;
-        mem_b_wshift = 3'd0;
+        mem_b_wshift = 2'd0;
         mem_b_wpos   = rpos_zero_pack;
         mem_b_wdata  = {LANES*WWIDTH{1'b0}};
         mem_b_we     = {LANES{1'b0}};
@@ -550,7 +581,7 @@ module hier_n4k_bidir_top #(
         case (state)
             ST_FWD_L0_B: begin
                 mem_b_rshift = rshift_op;
-                mem_b_rpos   = rpos_axis_i3_pack;
+                mem_b_rpos   = rpos_axis_i4_pack;
             end
             ST_PWM: begin
                 mem_b_rshift = rshift_op;
@@ -559,7 +590,7 @@ module hier_n4k_bidir_top #(
             default: ;
         endcase
 
-        if (state_d[8] == ST_FWD_L3_B && valid_d[8]) begin
+        if (state_d[8] == ST_FWD_L4_B && valid_d[8]) begin
             mem_b_wshift = wshift_d8;
             mem_b_wpos   = wpos_bc_d8;
             mem_b_wdata  = ntt_out_pack;
@@ -567,75 +598,90 @@ module hier_n4k_bidir_top #(
         end
         else if (state_d[5] == ST_LOAD && valid_d[5]) begin
             mem_b_wpos[load_bank_d5*LOG_DEPTH +: LOG_DEPTH] = load_pos_d5;
-            mem_b_wdata                                    = broadcast17(in_b_d[5]);
+            mem_b_wdata                                    = broadcastN(in_b_d[5]);
             mem_b_we[load_bank_d5]                         = 1'b1;
         end
     end
 
-    // ---- mem_scratch (consolidates mem_work + mem_trans) ------------------
-    // Reads cover all NTT-input and XTW-input phases.
-    // Writes cover all NTT-output and XTW-output phases (mutually exclusive
-    // with reads at any given cycle; verified that for every (state, tap)
-    // combination only one branch fires).
+    // ---- mem_scratch (consolidates work + trans) --------------------------
     always @(*) begin
-        mem_scratch_rshift = 3'd0;
+        mem_scratch_rshift = 2'd0;
         mem_scratch_rpos   = rpos_zero_pack;
-        mem_scratch_wshift = 3'd0;
+        mem_scratch_wshift = 2'd0;
         mem_scratch_wpos   = rpos_zero_pack;
         mem_scratch_wdata  = {LANES*WWIDTH{1'b0}};
         mem_scratch_we     = {LANES{1'b0}};
 
         // ---- Read side (one phase active at a time) ----
         case (state)
-            // XTW phases (previously mem_work reads, axis = next-NTT's axis)
+            // XTW1: read axis_i4 (just-written from FWD_L0)
             ST_FWD_XTW1_A, ST_FWD_XTW1_B: begin
+                mem_scratch_rshift = rshift_op;
+                mem_scratch_rpos   = rpos_axis_i4_pack;
+            end
+            // FWD_L1 sweeps i3 -> need axis_i3 layout
+            ST_FWD_L1_A, ST_FWD_L1_B: begin
                 mem_scratch_rshift = rshift_op;
                 mem_scratch_rpos   = rpos_axis_i3_pack;
             end
+            // XTW2 lane=i2 -> axis_i2 (so the i2 axis sweeps through k)
             ST_FWD_XTW2_A, ST_FWD_XTW2_B: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_axis_i1_pack;
-            end
-            ST_FWD_XTW3_A, ST_FWD_XTW3_B: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_broadcast_pack;
-            end
-            ST_INV_XTW3: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_broadcast_pack;
-            end
-            ST_INV_XTW2: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_axis_i1_pack;
-            end
-            ST_INV_XTW1: begin
-                mem_scratch_rshift = rshift_op;
-                mem_scratch_rpos   = rpos_axis_i2_pack;
-            end
-            // NTT phases (previously mem_trans reads)
-            ST_FWD_L1_A, ST_FWD_L1_B: begin
                 mem_scratch_rshift = rshift_op;
                 mem_scratch_rpos   = rpos_axis_i2_pack;
             end
             ST_FWD_L2_A, ST_FWD_L2_B: begin
                 mem_scratch_rshift = rshift_op;
+                mem_scratch_rpos   = rpos_axis_i2_pack;
+            end
+            ST_FWD_XTW3_A, ST_FWD_XTW3_B: begin
+                mem_scratch_rshift = rshift_op;
                 mem_scratch_rpos   = rpos_axis_i1_pack;
             end
             ST_FWD_L3_A, ST_FWD_L3_B: begin
                 mem_scratch_rshift = rshift_op;
+                mem_scratch_rpos   = rpos_axis_i1_pack;
+            end
+            ST_FWD_XTW4_A, ST_FWD_XTW4_B: begin
+                mem_scratch_rshift = rshift_op;
                 mem_scratch_rpos   = rpos_broadcast_pack;
             end
-            ST_INV_L2: begin
+            ST_FWD_L4_A, ST_FWD_L4_B: begin
+                mem_scratch_rshift = rshift_op;
+                mem_scratch_rpos   = rpos_broadcast_pack;
+            end
+            // INV chain (reverse): INV_L4 writes bc; XTW4 reads bc
+            ST_INV_XTW4: begin
+                mem_scratch_rshift = rshift_op;
+                mem_scratch_rpos   = rpos_broadcast_pack;
+            end
+            // INV_L3 sweeps k1 (lane=i1), data was broadcast -> need axis_i1
+            ST_INV_L3: begin
                 mem_scratch_rshift = rshift_op;
                 mem_scratch_rpos   = rpos_axis_i1_pack;
             end
-            ST_INV_L1: begin
+            ST_INV_XTW3: begin
+                mem_scratch_rshift = rshift_op;
+                mem_scratch_rpos   = rpos_axis_i1_pack;
+            end
+            ST_INV_L2: begin
                 mem_scratch_rshift = rshift_op;
                 mem_scratch_rpos   = rpos_axis_i2_pack;
             end
-            ST_INV_L0: begin
+            ST_INV_XTW2: begin
+                mem_scratch_rshift = rshift_op;
+                mem_scratch_rpos   = rpos_axis_i2_pack;
+            end
+            ST_INV_L1: begin
                 mem_scratch_rshift = rshift_op;
                 mem_scratch_rpos   = rpos_axis_i3_pack;
+            end
+            ST_INV_XTW1: begin
+                mem_scratch_rshift = rshift_op;
+                mem_scratch_rpos   = rpos_axis_i3_pack;
+            end
+            ST_INV_L0: begin
+                mem_scratch_rshift = rshift_op;
+                mem_scratch_rpos   = rpos_axis_i4_pack;
             end
             default: ;
         endcase
@@ -645,40 +691,54 @@ module hier_n4k_bidir_top #(
         if ((state_d[12] == ST_FWD_L0_A || state_d[12] == ST_FWD_L0_B)
             && valid_d[12]) begin
             mem_scratch_wshift = wshift_d12;
-            mem_scratch_wpos   = wpos_i3_d12;
+            mem_scratch_wpos   = wpos_i4_d12;
             mem_scratch_wdata  = ntt_out_pack;
             mem_scratch_we     = {LANES{1'b1}};
         end
-        // d8 tap: NTT-output phases (FWD_L1/L2, INV_L3/L2/L1)
+        // d8 tap: NTT-output phases
+        // FWD_L1 writes axis_i3, FWD_L2 writes axis_i2, FWD_L3 writes axis_i1
         else if ((state_d[8] == ST_FWD_L1_A || state_d[8] == ST_FWD_L1_B)
                  && valid_d[8]) begin
             mem_scratch_wshift = wshift_d8;
-            mem_scratch_wpos   = wpos_i2_d8;
+            mem_scratch_wpos   = wpos_i3_d8;
             mem_scratch_wdata  = ntt_out_pack;
             mem_scratch_we     = {LANES{1'b1}};
         end
         else if ((state_d[8] == ST_FWD_L2_A || state_d[8] == ST_FWD_L2_B)
                  && valid_d[8]) begin
             mem_scratch_wshift = wshift_d8;
+            mem_scratch_wpos   = wpos_i2_d8;
+            mem_scratch_wdata  = ntt_out_pack;
+            mem_scratch_we     = {LANES{1'b1}};
+        end
+        else if ((state_d[8] == ST_FWD_L3_A || state_d[8] == ST_FWD_L3_B)
+                 && valid_d[8]) begin
+            mem_scratch_wshift = wshift_d8;
             mem_scratch_wpos   = wpos_i1_d8;
             mem_scratch_wdata  = ntt_out_pack;
             mem_scratch_we     = {LANES{1'b1}};
         end
-        else if (state_d[8] == ST_INV_L3 && valid_d[8]) begin
+        else if (state_d[8] == ST_INV_L4 && valid_d[8]) begin
             mem_scratch_wshift = wshift_d8;
             mem_scratch_wpos   = wpos_bc_d8;
             mem_scratch_wdata  = ntt_out_pack;
             mem_scratch_we     = {LANES{1'b1}};
         end
-        else if (state_d[8] == ST_INV_L2 && valid_d[8]) begin
+        else if (state_d[8] == ST_INV_L3 && valid_d[8]) begin
             mem_scratch_wshift = wshift_d8;
             mem_scratch_wpos   = wpos_i1_d8;
             mem_scratch_wdata  = ntt_out_pack;
             mem_scratch_we     = {LANES{1'b1}};
         end
-        else if (state_d[8] == ST_INV_L1 && valid_d[8]) begin
+        else if (state_d[8] == ST_INV_L2 && valid_d[8]) begin
             mem_scratch_wshift = wshift_d8;
             mem_scratch_wpos   = wpos_i2_d8;
+            mem_scratch_wdata  = ntt_out_pack;
+            mem_scratch_we     = {LANES{1'b1}};
+        end
+        else if (state_d[8] == ST_INV_L1 && valid_d[8]) begin
+            mem_scratch_wshift = wshift_d8;
+            mem_scratch_wpos   = wpos_i3_d8;
             mem_scratch_wdata  = ntt_out_pack;
             mem_scratch_we     = {LANES{1'b1}};
         end
@@ -686,19 +746,32 @@ module hier_n4k_bidir_top #(
         else if ((state_d[5] == ST_FWD_XTW1_A || state_d[5] == ST_FWD_XTW1_B)
                  && valid_d[5]) begin
             mem_scratch_wshift = wshift_d5;
-            mem_scratch_wpos   = wpos_i3_d5;
+            mem_scratch_wpos   = wpos_i4_d5;   // i4 layout (read was axis_i4)
             mem_scratch_wdata  = mul_out_pack;
             mem_scratch_we     = {LANES{1'b1}};
         end
         else if ((state_d[5] == ST_FWD_XTW2_A || state_d[5] == ST_FWD_XTW2_B)
                  && valid_d[5]) begin
             mem_scratch_wshift = wshift_d5;
-            mem_scratch_wpos   = wpos_i1_d5;
+            mem_scratch_wpos   = wpos_i2_d5;
             mem_scratch_wdata  = mul_out_pack;
             mem_scratch_we     = {LANES{1'b1}};
         end
         else if ((state_d[5] == ST_FWD_XTW3_A || state_d[5] == ST_FWD_XTW3_B)
                  && valid_d[5]) begin
+            mem_scratch_wshift = wshift_d5;
+            mem_scratch_wpos   = wpos_i1_d5;
+            mem_scratch_wdata  = mul_out_pack;
+            mem_scratch_we     = {LANES{1'b1}};
+        end
+        else if ((state_d[5] == ST_FWD_XTW4_A || state_d[5] == ST_FWD_XTW4_B)
+                 && valid_d[5]) begin
+            mem_scratch_wshift = wshift_d5;
+            mem_scratch_wpos   = wpos_bc_d5;
+            mem_scratch_wdata  = mul_out_pack;
+            mem_scratch_we     = {LANES{1'b1}};
+        end
+        else if (state_d[5] == ST_INV_XTW4 && valid_d[5]) begin
             mem_scratch_wshift = wshift_d5;
             mem_scratch_wpos   = wpos_bc_d5;
             mem_scratch_wdata  = mul_out_pack;
@@ -706,19 +779,19 @@ module hier_n4k_bidir_top #(
         end
         else if (state_d[5] == ST_INV_XTW3 && valid_d[5]) begin
             mem_scratch_wshift = wshift_d5;
-            mem_scratch_wpos   = wpos_bc_d5;
+            mem_scratch_wpos   = wpos_i1_d5;
             mem_scratch_wdata  = mul_out_pack;
             mem_scratch_we     = {LANES{1'b1}};
         end
         else if (state_d[5] == ST_INV_XTW2 && valid_d[5]) begin
             mem_scratch_wshift = wshift_d5;
-            mem_scratch_wpos   = wpos_i1_d5;
+            mem_scratch_wpos   = wpos_i2_d5;
             mem_scratch_wdata  = mul_out_pack;
             mem_scratch_we     = {LANES{1'b1}};
         end
         else if (state_d[5] == ST_INV_XTW1 && valid_d[5]) begin
             mem_scratch_wshift = wshift_d5;
-            mem_scratch_wpos   = wpos_i2_d5;
+            mem_scratch_wpos   = wpos_i3_d5;
             mem_scratch_wdata  = mul_out_pack;
             mem_scratch_we     = {LANES{1'b1}};
         end
@@ -738,9 +811,10 @@ module hier_n4k_bidir_top #(
                 ST_FWD_L1_A, ST_FWD_L1_B,
                 ST_FWD_L2_A, ST_FWD_L2_B,
                 ST_FWD_L3_A, ST_FWD_L3_B,
-                ST_INV_L2, ST_INV_L1, ST_INV_L0:
+                ST_FWD_L4_A, ST_FWD_L4_B,
+                ST_INV_L3, ST_INV_L2, ST_INV_L1, ST_INV_L0:
                     ntt_in_pack = scratch_rdata;
-                ST_INV_L3:
+                ST_INV_L4:
                     ntt_in_pack = mem_a_rdata;
                 default: ;
             endcase
@@ -767,7 +841,8 @@ module hier_n4k_bidir_top #(
                     ST_FWD_XTW1_A, ST_FWD_XTW1_B,
                     ST_FWD_XTW2_A, ST_FWD_XTW2_B,
                     ST_FWD_XTW3_A, ST_FWD_XTW3_B,
-                    ST_INV_XTW1, ST_INV_XTW2, ST_INV_XTW3: begin
+                    ST_FWD_XTW4_A, ST_FWD_XTW4_B,
+                    ST_INV_XTW1, ST_INV_XTW2, ST_INV_XTW3, ST_INV_XTW4: begin
                         mul_a_pack[ci*WWIDTH +: WWIDTH] = scratch_rdata[ci*WWIDTH +: WWIDTH];
                         mul_b_pack[ci*WWIDTH +: WWIDTH] = tw_pack     [ci*WWIDTH +: WWIDTH];
                     end
@@ -844,6 +919,16 @@ module hier_n4k_bidir_top #(
                 end
                 ST_FWD_L3_A: begin
                     cycle_count <= cycle_count + 1;
+                    if (op_count == SCAN_LEN-1) begin op_count <= 0; state <= ST_FWD_XTW4_A; end
+                    else op_count <= op_count + 1;
+                end
+                ST_FWD_XTW4_A: begin
+                    cycle_count <= cycle_count + 1;
+                    if (op_count == SCAN_LEN-1) begin op_count <= 0; state <= ST_FWD_L4_A; end
+                    else op_count <= op_count + 1;
+                end
+                ST_FWD_L4_A: begin
+                    cycle_count <= cycle_count + 1;
                     if (op_count == SCAN_LEN-1) begin op_count <= 0; state <= ST_FWD_L0_B; end
                     else op_count <= op_count + 1;
                 end
@@ -881,17 +966,37 @@ module hier_n4k_bidir_top #(
                 end
                 ST_FWD_L3_B: begin
                     cycle_count <= cycle_count + 1;
+                    if (op_count == SCAN_LEN-1) begin op_count <= 0; state <= ST_FWD_XTW4_B; end
+                    else op_count <= op_count + 1;
+                end
+                ST_FWD_XTW4_B: begin
+                    cycle_count <= cycle_count + 1;
+                    if (op_count == SCAN_LEN-1) begin op_count <= 0; state <= ST_FWD_L4_B; end
+                    else op_count <= op_count + 1;
+                end
+                ST_FWD_L4_B: begin
+                    cycle_count <= cycle_count + 1;
                     if (op_count == SCAN_LEN-1) begin op_count <= 0; state <= ST_PWM; end
                     else op_count <= op_count + 1;
                 end
 
                 ST_PWM: begin
                     cycle_count <= cycle_count + 1;
-                    if (op_count == SCAN_LEN-1) begin op_count <= 0; state <= ST_INV_L3; end
+                    if (op_count == SCAN_LEN-1) begin op_count <= 0; state <= ST_INV_L4; end
                     else op_count <= op_count + 1;
                 end
 
                 // Inverse chain
+                ST_INV_L4: begin
+                    cycle_count <= cycle_count + 1;
+                    if (op_count == SCAN_LEN-1) begin op_count <= 0; state <= ST_INV_XTW4; end
+                    else op_count <= op_count + 1;
+                end
+                ST_INV_XTW4: begin
+                    cycle_count <= cycle_count + 1;
+                    if (op_count == SCAN_LEN-1) begin op_count <= 0; state <= ST_INV_L3; end
+                    else op_count <= op_count + 1;
+                end
                 ST_INV_L3: begin
                     cycle_count <= cycle_count + 1;
                     if (op_count == SCAN_LEN-1) begin op_count <= 0; state <= ST_INV_XTW3; end
@@ -944,4 +1049,4 @@ module hier_n4k_bidir_top #(
 
 endmodule
 
-`endif // _HIER_N4K_BIDIR_TOP_GUARD
+`endif // _HIER_D5_L8_TOP_GUARD
