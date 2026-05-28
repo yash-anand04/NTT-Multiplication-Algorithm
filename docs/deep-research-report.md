@@ -1,4 +1,16 @@
-# Executive Summary  
+# Executive Summary
+
+> ⚠️ **CITATION/CLAIM HEALTH WARNING (2026-05-28).** This report predates the
+> F₄ scope correction and contains retired claims (e.g. large-N / 10⁹ HBM
+> scaling) and auto-generated `【NN†Lxx】` markers that are **research-tool
+> artifacts, not real citation anchors — ignore them.** For verified author
+> names, venues, and the list of retired/false claims, **`docs/VERIFIED_REFERENCES.md`
+> is the source of truth.** In particular: the Fermat-NTT paper is **Xing et al.
+> (IEEE TC 2025)** (NOT a separate "Cheung et al." — same paper, Cheung is senior
+> author); and the multivariate Fermat-NTT *algorithm* is prior art (Kim, Mert
+> et al., CRYPTO 2024, eprint 2024/314), so it must not be claimed as novel here.
+
+
 Hierarchical tensor decomposition of large NTT/FFT problems can drastically reduce global communication and achieve near-peak memory bandwidth.  Instead of driving one giant crossbar network for the entire transform, we partition the problem into smaller sub-transforms (with local data blocks and twiddle multiplications), streaming each block through a fixed-size NTT core.  This “multidimensional” FFT/NTT approach (e.g. 4‐step, 6‐step or d-dimensional Cooley–Tukey) has been studied in HPC and cryptography; it yields unit‐stride bursts and minimal off-chip access【32†L17-L25】【61†L1245-L1254】.  Our goal is a new FPGA architecture that formalizes this idea: it preserves contiguous data streams (large AXI bursts) within each level of the decomposition, drastically cuts down all-to-all routing, and relies on small on-chip buffers instead of full crossbars.  Key metrics to optimize include **memory bandwidth utilization**, **address generator complexity (LUTs)**, **routing congestion** (critical net lengths, fanout), **BRAM/URAM usage**, **crossbar/LUT usage**, **F<sub>max</sub>**, **AXI/DRAM efficiency**, **power**, **latency**, and **throughput**.
 
 
@@ -23,7 +35,7 @@ Our optimization goal is thus to **minimize global fanout/crossbar size and rout
 
 **Hierarchical NTT/FFT in FPGA research:**  Recent FPGA works have applied these ideas.  Koçer (2024) proposes a *7-step* negacyclic NTT for FPGAs, recursively partitioning n=n<sub>11</sub>·n<sub>12</sub>·n<sub>21</sub>·n<sub>22</sub> and running two 4-step NTTs (one on each block dimension) with a twiddle multiplication in between【61†L1245-L1254】【61†L1288-L1296】.  This yields significantly higher pipeline parallelism than flat 4-step designs, allowing up to **8.14× speed-up** and **4.01× reduction in area-time product** versus a conventional implementation【22†L42-L47】.  Wang & Gao’s SAM (2023) uses a *multi-dimensional decomposition* on FPGA: they tile an arbitrary NTT into a hypercube of fixed-size NTT kernels.  Their accelerator reuses the same compute blocks for each sub-NTT, balancing on-chip compute with off-chip bandwidth, and reports outperforming prior large-NTT designs by **>2×** at large sizes【23†L19-L27】【23†L27-L30】.  Kurniawan *et al.* (2023) describe a *“memory-based” NTT* that uses conflict-free multi-bank RAM to feed a butterfly array【44†L49-L54】.  They achieve significant throughput gains (8.9× speedup vs CPU, 1.46× throughput/slice over prior FPGA designs) by ensuring two concurrent NTT memory accesses never collide【44†L49-L54】.  These works underscore that carefully crafted memory layouts and bank scheduling can dramatically boost performance.
 
-**Fermat moduli NTTs:**  Cheung *et al.* (2025) study NTTs over Fermat primes (q=2<sup>k</sup>+1), which simplify twiddles to pure power-of-two factors.  Their *mixed-radix high-radix NTT* exploits this and demonstrates **30–85% reduction in DSP-area×time** and **70–100% reduction in BRAM-area×time** compared to previous designs【55†L88-L92】.  (This is mostly an arithmetic optimization, but it further encourages hierarchical splits since power-of-two twiddles often allow reuse across sub-transforms.)  
+**Fermat moduli NTTs:**  Xing *et al.* (IEEE TC 2025) [Xing, Li, Ye, Luk, Chen, Yan, Cheung — cite by first author "Xing et al.", not "Cheung et al."]  study NTTs over Fermat primes (q=2<sup>k</sup>+1), which simplify twiddles to pure power-of-two factors.  Their *mixed-radix high-radix NTT* exploits this and demonstrates **30–85% reduction in DSP-area×time** and **70–100% reduction in BRAM-area×time** compared to previous designs【55†L88-L92】.  (This is mostly an arithmetic optimization, but it further encourages hierarchical splits since power-of-two twiddles often allow reuse across sub-transforms.)  
 
 **FPGA vendor and system references:**  Vendor docs on memory (e.g. Xilinx HBM/DDR guides) stress using large bursts and bank cycling to maximize bandwidth【48†L615-L623】.  In our context, these highlight why streaming contiguous data blocks is crucial.  The Supranational FPGA NTT (ZPrize) report also documents that single-beat reads hurt HBM utilization (~50%), whereas 8-beat bursts nearly saturate it【48†L596-L601】.  
 

@@ -2080,13 +2080,11 @@ exact (or projected) cycle count.
 | **d=3** | **N=64 ✅ — 589 cyc** | **N=512 ✅ — 2,253 cyc** | **N=4,096 ✅ — 12,493 cyc** | **N=32,768 ✅ Phase D — 82,112 cyc** |
 | **d=4** | **N=256 ✅ — 2,197 cyc** | **N=4,096 ✅ — 19,733 cyc** | N=65,536 ❌ | ❌ |
 | **d=5** | **N=1,024 ✅ — 9,565 cyc** | **N=32,768 ✅ — 180,573 cyc** | ❌ | ❌ |
-| **d=6** | N=4,096 ⚠️ Py-validated — **~43,448 cyc** | ❌ | ❌ | ❌ |
-| **d=7** | N=16,384 ⚠️ Py-validated — **~197,128 cyc** | ❌ | ❌ | ❌ |
+| **d=6** | **N=4,096 ✅ — 43,429 cyc** | ❌ | ❌ | ❌ |
+| **d=7** | **N=16,384 ✅ — 197,101 cyc** | ❌ | ❌ | ❌ |
 
-✅ = measured and functionally verified on U280 (**12 cells**, all 4 tests incl.
-   random-vs-golden PASS).
-⚠️ = Python golden validated (`scripts/nvar_ntt_model.py`), RTL generator ready
-   (`scripts/gen_hier_dN_L4.py`) but RTL not yet built/run.
+✅ = measured and functionally verified on U280 (**all 13 valid cells**, every
+   4-test suite incl. random-vs-golden PASS). **The matrix is complete.**
 ❌ = invalid under F₄ — 2N exceeds q−1 = 65 536, ψ does not exist.
 
 > **2026-05-28 — the L-variant / d-extended designs are now fully working.**
@@ -2156,6 +2154,14 @@ New 6 cells measured 2026-05-28 (after the `ntt_start` fix + testbench-vector fi
 | 8  | 4 | 4,096  | 5,624  | 1,641 | 8  | 14 | 222 MHz | 19,733  | 88.8 µs  | 4.82 | `hier_n4k_bidir_top` (shift-only) |
 | 4  | 5 | 1,024  | 2,305  | 940   | 4  | 7  | 222 MHz | 9,565   | 43.0 µs  | 9.34 | `hier_d5_L4_top` |
 | 8  | 5 | 32,768 | 6,171  | 1,678 | 8  | 50 | 222 MHz | 180,573 | 812.6 µs | 5.51 | `hier_d5_L8_top` |
+| 4  | 6 | 4,096  | 2,360  | 965   | 4  | 7  | 222 MHz | 43,429  | 195.4 µs | 10.6 | `hier_d6_L4_top` (generated) |
+| 4  | 7 | 16,384 | 2,543  | 981   | 4  | 25 | 222 MHz | 197,101 | 887.0 µs | 12.0 | `hier_d7_L4_top` (generated) |
+
+**The L=4 column is now the cleanest constant-hardware-in-d evidence in the
+project:** across d = 3 → 7 (N = 64 → 16 384, a **256× N increase**), LUT moves
+only 2,116 → 2,543 (**+20 %**), DSP is **exactly 4** at every depth, and BRAM
+stays 7 until N finally forces more banks at d=7 (25). Compute hardware is
+effectively flat while N grows by Lᵈ — measured, across five depths.
 
 \* Phase C uses LUTRAM (not BRAM) — its bank storage is in LUT (~5K LUT
 of LUTRAM cells, baked into the 36,839 LUT total).  The L=8 d=2/4/5 cells
@@ -2201,16 +2207,20 @@ superseded DSP d=4 demo 61 MHz).
 - Synth: `synth/vivado_synth_newcells.tcl` (generic, U280, 4.5 ns).
 - Golden: `scripts/nvar_ntt_model.py` (generic d-variate; PASSES d=5,6,7).
 
-### 19.4 Remaining unbuilt cells (Python-validated, RTL one command away)
+### 19.4 Matrix complete — d=6 and d=7 built, verified, synthesised (2026-05-28)
 
-| Cell | Projected cycles | Status |
-|---|---|---|
-| L=4 d=6 N=4,096  | ~43,448  | Algorithm PASSES in `nvar_ntt_model.py`; emit RTL via `python scripts/gen_hier_dN_L4.py 6`, then sim+synth.  Generator already validated (reproduces working d=5). |
-| L=4 d=7 N=16,384 | ~197,128 | Same — `gen_hier_dN_L4.py 7`. |
+The last two valid cells were generated via `scripts/gen_hier_dN_L4.py`,
+verified against the generic golden, and synthesised on U280. **No valid cell
+remains unbuilt.**
 
-These two are the only valid cells left (d=6/d=7 at L>4 exceed N=32,768).
-They were deferred by choice, not blocked: the generic golden confirms the
-math and the generator is validated, so each is a generate→sim→synth away.
+| Cell | Cycles (measured) | Projection | Δ | Result |
+|---|---|---|---|---|
+| L=4 d=6 N=4,096  | 43,429  | ~43,448  | 19 | 4/4 PASS; LUT 2,360, DSP 4, BRAM 7, 222 MHz |
+| L=4 d=7 N=16,384 | 197,101 | ~197,128 | 27 | 4/4 PASS; LUT 2,543, DSP 4, BRAM 25, 222 MHz |
+
+The cycle model `(6d−2)·N/L + 2N + drain(d)` is now anchored on **6 measured
+d-points (d=2,3,4,5,6,7)**, all within ≤27 cycles of measurement. d=6/d=7 at
+L>4 are invalid (N>32,768), so the F₄-valid (L,d) grid is fully covered.
 
 #### d=5 algorithm — derived and validated this session
 
@@ -2268,20 +2278,114 @@ Even with 6/13 cells measured, the L × d trade-off is empirically clear:
   free per coefficient
 - This validates the d-step architectural pattern within F₄'s bound
 
-### 19.5 Honest summary
+### 19.5 Honest summary (updated 2026-05-28)
 
-We have a **complete 4-point L-sweep at d=3** and a **2-point d-sweep
-at L=32**, plus a corner cell at L=8 d=4 with a different sub-NTT.
-This 6-cell measurement set fully captures the architectural scaling
-laws (§19.4) and is sufficient evidence for both the L-scaling and
-d-scaling claims.
+The matrix is **complete: all 13 F₄-valid (L,d) cells built, functionally
+verified (random-vs-golden), and synthesised on U280.** The earlier "6 cells /
+undiagnosed bug / ~4-6 weeks of work" assessment is obsolete — the blocking
+"bug" was a one-line `ntt_start` timing issue (fixed; see §19.1 banner) plus a
+testbench-vector mismatch on the d=2 cells (not an RTL bug at all).
 
-Completing the remaining 7 cells (d=2 row beyond L=32; d=4 with shift-only;
-d=5/6/7 corners) would strengthen the empirical evidence but does not
-change the architectural conclusions.  The realistic completion path
-requires ~4-6 weeks of additional RTL work plus the convention-bug
-debug we already encountered twice (WEXP for d=3, and a still-undiagnosed
-issue for the d=2 / d=4 substituted variants).
+The validated empirical record for the paper:
+- **Full L×d grid** (§19.2): L ∈ {4,8,16,32} × d ∈ {2,3,4,5}, plus the
+  d=6/d=7 L=4 corners — N = 64 … 32,768.
+- **Constant-hardware-in-d** demonstrated across **five depths** at L=4
+  (d=3→7: LUT +20 % for 256× N, DSP fixed at 4).
+- **Cycle model** anchored on six measured d-points, all within ≤27 cycles.
+- **Transpose-free banking verified** (§19.6).
 
-For the **paper writeup**, the 6-cell matrix above plus the standalone
-sub-NTT scaling data (§18.1) is the validated empirical record.
+Honest scope caveat (unchanged): everything is **N ≤ 32,768** — the F₄ ceiling.
+The large-N (10⁶/10⁹) story is retired; reaching it needs CRT or a larger
+Fermat prime (future work). See `docs/VERIFIED_REFERENCES.md` for the
+prior-art boundaries (the multivariate Fermat-NTT *algorithm* is Kim et al.
+CRYPTO 2024; same-modulus competitor is Xing et al. IEEE TC 2025).
+
+### 19.6 Transpose-free conflict-free banking (verified — Plan G2)
+
+The standard hazard in multi-step / four-step NTT hardware is the **corner-turn
+(transpose)** between axis passes, which usually costs either a second
+N-element ping-pong buffer or a dedicated transpose network. **This design has
+neither.** Verified by RTL inspection of the d≥3 family:
+
+1. **Three memories total, no transpose buffer.** Every d≥3 top instantiates
+   exactly `mem_a`, `mem_b` (the two operands — inherent to any multiply) and a
+   **single** `mem_scratch` working buffer. There is no dedicated
+   transpose/corner-turn memory. (Phase C d=2 L=32 uses the older 4-memory
+   layout — the consolidation was reverted there for a layout reason; the clean
+   transpose-free claim is for d≥3.)
+2. **`banked_mem` holds the data once.** Its only storage is the per-bank
+   `reg mem[0:DEPTH-1]` (LANES banks × DEPTH = N words, one copy). No transpose
+   array.
+3. **The "transpose" is pure address remapping.** Switching the swept axis
+   between passes changes only the `rpos`/`rshift` pattern; the conflict-free
+   bank map `bank = (Σ iⱼ) mod L` guarantees the L elements along *any* axis
+   land in L distinct banks, so they are read/written in one cycle with no
+   bank conflict. Data never moves to a transpose buffer — `mem_scratch` is
+   read and written **in place** within each phase (verified: 21 read + 21
+   write sites on the same memory in the generated d=6 top), with the 12-cycle
+   drain preventing the cross-phase R/W race.
+4. **The interconnect is an L-wide barrel rotation, not an L×L crossbar.**
+   `banked_mem` routes bank b ← lane (b ∓ shift) mod LANES — a cyclic rotation
+   of width LANES = L, not a full crossbar (O(L) muxing, not O(L²)).
+
+**Why this is the mechanism behind constant-hardware-in-d.** The interconnect
+width is L and the working set is one in-place scratch — **both independent of
+d and N.** That is precisely why LUT/DSP stay flat as d grows (§19.2): the
+measured +20 % LUT across d=3→7 is itself the empirical proof that the
+interconnect does not scale with N. (Empirical post-route max-fanout/net-length
+numbers are a remaining nice-to-have; the structural argument + the flat
+measured LUT curve already establish the bounded-interconnect claim.)
+
+## 20. Honest comparison vs the same-modulus SOTA (Xing et al., IEEE TC 2025)
+
+`scripts/compare_metrics.py` computes area-time metrics for all our cells and a
+head-to-head at the **only N where both have data (N=1024)**. The numbers are
+deliberately reported without spin.
+
+> ⚠️ Xing's figures are transcribed from prior project notes (1×R16, N=1024:
+> 9,783 LUT, 16 DSP, 0 BRAM, 274 MHz, 2.6 µs). **Verify against the primary PDF**
+> (`docs/VERIFIED_REFERENCES.md` [R1]) before publication.
+
+### 20.1 Head-to-head at N=1024
+
+| Design | LUT | DSP | Time | LUT-ATP (LUT·µs) | DSP-ATP (DSP·µs) | Throughput (Mel/s) | /DSP | /kLUT |
+|---|---|---|---|---|---|---|---|---|
+| ours `hier d2 L32` | 36,839 | 32 | 13.8 µs | 509,402 | 442 | 74.0 | 2.3 | 2.0 |
+| ours `hier d5 L4`  | 2,305  | 4  | 43.1 µs | 99,312  | 172 | 23.8 | 5.9 | 10.3 |
+| **Xing 1×R16** [R1]| 9,783  | 16 | **2.6 µs** | **25,422** | **41.6** | **394** | **24.6** | **40.3** |
+
+### 20.2 The honest verdict (no cherry-picking)
+
+**Xing wins every area-time-efficiency metric at N=1024:** time (5–16× faster),
+LUT-ATP, **DSP-ATP** (~4–11× better), raw throughput (~5–16×), and both
+normalized throughputs (throughput-per-DSP, throughput-per-kLUT). A well-designed
+iterative high-radix NTT is simply more efficient than hierarchical decomposition
+at this (small) N.
+
+**The only axes on which we "win" are absolute footprint, not efficiency:**
+- lowest absolute **LUT** (2,305 vs 9,783) and absolute **DSP** (4 vs 16) — but
+  that cell (`hier d5 L4`) is ~16× slower, so it is a *minimal-area, low-throughput*
+  point, not an efficiency win;
+- **N-reach**: we measured the same modulus up to N=32,768; Xing reported to
+  N=1,024. This is a coverage difference, **not** a measured head-to-head win.
+
+⚠️ **Retraction of an earlier internal claim.** A prior note asserted DSP-area×time
+was "where shift-only wins." **That was false** — the table above shows Xing's
+DSP-ATP (41.6) beats both our N=1024 cells (172, 442). Do not repeat it.
+
+### 20.3 What this means for the paper
+
+This is **not** a "we beat SOTA" paper and must not be framed as one. The honest,
+defensible contribution is:
+1. a **measured design-space exploration** of the multivariate Fermat NTT
+   (algorithm: Kim et al., CRYPTO 2024 [R2]) across the full F₄-valid L×d grid;
+2. the **constant-hardware-in-d scaling law** (LUT/DSP flat as N=Lᵈ grows),
+   measured across d=2…7 and explained by the transpose-free L-wide interconnect
+   (§19.6);
+3. **operation to N=32,768 at q=65537**, a regime [R1] did not report;
+4. the **minimal absolute resource footprint** (4 DSP, ~2.3 K LUT) for
+   area-constrained, latency-tolerant deployment.
+
+Against SOTA we are slower and less area-time-efficient at overlapping N — state
+that plainly. The value is the systematic scaling characterization, not a
+performance crown.

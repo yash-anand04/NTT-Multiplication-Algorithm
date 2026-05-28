@@ -1,10 +1,19 @@
-# Implementation Plan: Hierarchical Bivariate NTT for Large-N FPGA Polynomial Multiplication
+# Implementation Plan: Hierarchical Multivariate NTT for FPGA Polynomial Multiplication
 
-**Target paper title (placeholder):**
-*"Hierarchical Multivariate NTT for Polynomial Multiplication at N up to 10⁹: Constant-Hardware Scaling with 32-pt Fermat-Modulus Sub-Transforms on HBM-Equipped FPGA."*
+**Target paper title (placeholder, v4):**
+*"A Design-Space Exploration of Hierarchical Multivariate NTT for Negacyclic
+Polynomial Multiplication over a Fermat Modulus: Constant-Hardware Scaling in
+Decomposition Depth on FPGA."*
 
 **Author:** [you]
-**Status:** Implementation plan v2, 2026-05-16. Revised after audit against `docs/deep-research-report.md`.
+**Status:** **v4 (2026-05-28) — the authoritative plan is now §11.** Sections 0–10
+are retained as the v1–v3 audit trail (they contain the now-retired "N up to 10⁹"
+HBM scope, corrected in `IMPLEMENTATION_DOC.md` §13 and superseded by §11 below).
+
+> **Read §11 first.** The original large-N HBM thesis is invalid under F₄
+> (N is hard-capped at 32,768, see §11.0); the project has since *built and
+> measured* the full L×d grid, which reframes the contribution as a
+> design-space / scaling-law study rather than a "practical at 10⁹" claim.
 
 ---
 
@@ -15,6 +24,7 @@
 | v1 | 2026-05-16 | Initial draft targeting Kintex-7 xc7k160t + DDR3 |
 | v2 | 2026-05-16 | Target moved to Xilinx Alveo U280 (HBM2). Pipelined sub-NTT default. URAM added as storage. Twiddle compression. Specialized cross-twiddle at level boundaries. Burst-length microbenchmark added. Comparison table now includes Koçer/Wang/Kurniawan/Supranational. |
 | **v3** | **2026-05-24** | **Reality check after Phase C and Phase D land. We over-shot targets by 3.7× LUT / 4× DSP and missed Fmax by 1.5×. None of the plan-critical optimizations (level-boundary sign-flip, quarter-cycle twiddle compression, BRAM twiddle ROM) were applied. Xing et al. (TC 2025) published a competitor for q=65537 that beats us 4.5× on LUT and 5.3× on time at N=1024. Adding §10 "Reality check" with measured-vs-planned table and the decision branches for the remaining work.** |
+| **v4** | **2026-05-28** | **Scope corrected and grid completed. (1) F₄ caps N at 32,768 — the "N up to 10⁹ / HBM streaming" thesis is retired (§11.0). (2) The full L×d grid is now BUILT and MEASURED: all 13 of 13 valid cells, all functionally verified (random-vs-golden) and synthesised on U280. (3) Root-caused + fixed the systemic `ntt_start` timing bug that had blocked every d≥3 bidir variant; the d=2 "failures" were a testbench vector mismatch, not RTL. (4) Shift-only bidir sub-NTT proven to crush the DSP variant (d=4 L=8: −49 % LUT, −78 % DSP, 3.6× Fmax). New authoritative plan in §11 reframes the paper as a design-space / depth-scaling study and lists the concrete gaps to close.** |
 
 ---
 
@@ -726,3 +736,247 @@ sub-3-seconds.
 **Branch D** is the most interesting but speculative.
 
 A reasonable hybrid is: **(A) with a side-by-side ablation** that shows the impact of each of the §10.2 optimizations on Phase C, then push to Phase E with the optimized datapath. The ablation table itself becomes a paper contribution alongside the large-N measurements.
+
+---
+
+# 11. v4 — Authoritative plan (2026-05-28)
+
+> This section supersedes §1–§2 and the Branch A–D decision in §10.4.
+> §0–§10 remain as the historical audit trail.
+
+## 11.0 The two facts that reframe the whole project
+
+1. **F₄ hard-caps N at 32,768.** Negacyclic polyMul mod (Xᴺ+1) needs a 2N-th
+   primitive root ψ; 2N must divide q−1 = 65 536, so **N ≤ 32 768**. The
+   v1–v3 "N up to 10⁶/10⁹, HBM-resident, practical at 10⁹ in ~2 s" headline is
+   **mathematically infeasible under F₄** (confirmed in `IMPLEMENTATION_DOC.md`
+   §13, §0). Large N is reachable only via (a) CRT across multiple ≤32 K
+   sub-products, or (b) a larger Fermat prime (e.g. F₅ = 2³²+1). **Both are
+   out of scope for this paper and listed as future work (§11.7).**
+
+2. **The L×d grid is built and measured.** What v3 listed as "future work
+   under Branch A/B" is now done. **All 13 of 13** valid (L,d) cells are functionally
+   verified (identity / zero / X·1 / random-vs-golden all PASS) and
+   synthesised on U280. See `IMPLEMENTATION_DOC.md` §19.2.
+
+These together kill the original "large-N HBM scaling" paper but hand us a
+**different, fully-measured paper** that is honest and defensible.
+
+## 11.1 The realistic contribution (what this paper actually is)
+
+A **measured design-space exploration (DSE) and scaling-law study** of a
+hierarchical multivariate (multi-step Cooley–Tukey) NTT polynomial multiplier
+over F₄ on a single FPGA. It is **not** an algorithm-novelty paper — multi-step
+NTT, shift-only Fermat butterflies, and conflict-free banking are all prior art
+(carry the v1 "What NOT to Claim" list forward).
+
+> ⚠️ **Prior-art reality check (verified 2026-05-28; `docs/VERIFIED_REFERENCES.md`
+> is the source of truth).** The *multivariate Fermat NTT itself* — the
+> univariate→multivariate polynomial-ring transformation combined with a
+> multiplier-less Fermat-modulus NTT — was published by **Kim, Mert et al.,
+> "Exploring the Advantages and Challenges of Fermat NTT in FHE Acceleration,"
+> CRYPTO 2024 (IACR eprint 2024/314).** The *algorithm* is theirs; our claimable
+> contribution is strictly the **FPGA implementation + measured DSE** of it.
+> Same-modulus competitor is **Xing et al. (IEEE TC 2025)** — note this is the
+> single paper formerly mis-cited as both "Xing et al." and "Cheung et al."
+
+**Primary, defensible contributions (in descending strength):**
+1. **Depth-as-a-constant-hardware scaling knob.** Across d = 2…5 at fixed lane
+   width L, compute hardware (LUT, DSP) is essentially constant; only memory
+   (BRAM/URAM) grows, and only with N. DSP is *exactly* L in every cell.
+   Measured, not extrapolated.
+2. **A complete L×d ATP design map** (L ∈ {4,8,16,32} × d ∈ {2,3,4,5},
+   N = 64…32 768) giving actionable "pick L,d for target N / area / latency"
+   guidance.
+3. **Shift-only bidirectional sub-NTT** as the right inner kernel: vs the
+   DSP-based variant at the same N=4096, −49 % LUT, −78 % DSP, 3.6× Fmax.
+4. **(Candidate, must be verified — §11.4 G2) transpose-free hierarchical
+   banking**: the `(Σ iⱼ) mod L` bank map + lane-rotation crossbar appears to
+   avoid the explicit corner-turn buffer that multi-step NTT hardware usually
+   pays for, for *arbitrary* d. If confirmed, this is the most distinctive
+   implementation contribution.
+
+**Target venue:** mid-tier reconfigurable-computing / HW-security venue
+(FPL, TRETS, JETCAS, FCCM short, or a workshop). Top-tier (TC/TCAD/FPGA) is
+not realistic without the Xing-hybrid or CRT extension (§11.7).
+
+## 11.2 The measured substrate (done — do not rebuild)
+
+U280 `xcu280-fsvh2892-2L-e`, 4.5 ns target. All shift-only unless noted.
+
+| L | d | N | LUT | FF | DSP | BRAM | Fmax | Cycles | Time |
+|---|---|---|---|---|---|---|---|---|---|
+| 8  | 2 | 64     | 5,698  | 1,548 | 8  | 0  | 222 | 329     | 1.48 µs |
+| 16 | 2 | 256    | 14,477 | 2,949 | 16 | 0  | 222 | 793     | 3.57 µs |
+| 32 | 2 | 1,024  | 36,839 | 5,816 | 32 | 0\* | 180 | 2,489   | 13.8 µs |
+| 4  | 3 | 64     | 2,116  | 908   | 4  | 7  | 222 | 589     | 2.65 µs |
+| 8  | 3 | 512    | 5,452  | 1,616 | 8  | 14 | 222 | 2,253   | 10.1 µs |
+| 16 | 3 | 4,096  | 13,320 | 3,026 | 16 | 28 | 222 | 12,493  | 56.2 µs |
+| 32 | 3 | 32,768 | 36,539 | 5,929 | 32 | 56 | 236 | 82,112  | 347 µs  |
+| 4  | 4 | 256    | 2,158  | 924   | 4  | 7  | 222 | 2,197   | 9.89 µs |
+| 8  | 4 | 4,096  | 5,624  | 1,641 | 8  | 14 | 222 | 19,733  | 88.8 µs |
+| 4  | 5 | 1,024  | 2,305  | 940   | 4  | 7  | 222 | 9,565   | 43.0 µs |
+| 8  | 5 | 32,768 | 6,171  | 1,678 | 8  | 50 | 222 | 180,573 | 812.6 µs |
+| 4  | 6 | 4,096  | 2,360  | 965   | 4  | 7  | 222 | 43,429  | 195.4 µs |
+| 4  | 7 | 16,384 | 2,543  | 981   | 4  | 25 | 222 | 197,101 | 887.0 µs |
+
+\* Phase C bank storage is LUTRAM (baked into the LUT total), not BRAM.
+**Matrix complete — all 13 F₄-valid (L,d) cells measured (2026-05-28).** The
+L=4 column d=3→7 shows LUT 2,116→2,543 (+20 %) for a 256× N increase with DSP
+fixed at 4 — the constant-hardware-in-d headline, now across five depths.
+
+Supporting artefacts already in the repo:
+- Generic d-variate golden `scripts/nvar_ntt_model.py` (PASSES d=5,6,7).
+- Validated RTL generator `scripts/gen_hier_dN_L4.py` (reproduces working d=5).
+- Generic synth flow `synth/vivado_synth_newcells.tcl`.
+- Cycle model `(6d−2)·N/L + 2N + drain(d)`, validated to ≤1 cycle at d=2,3,4,5.
+
+## 11.3 The gaps between "we have data" and "we have a paper"
+
+The grid alone does **not** yet prove the paper's claims against a baseline.
+Ranked by ROI (impact ÷ effort):
+
+| ID | Gap | Why it matters | Effort |
+|---|---|---|---|
+| **G1** | **Same-device flat/monolithic baseline on U280.** | The original crossover thesis was never closed on a common device (monolithic numbers are Virtex-7, single N; the flat design only has a synth-only "doesn't fit" point). Without this there is no measured "decomposed vs monolithic" claim. | **Medium** |
+| **G2** | **Verify + quantify the transpose-free banking claim.** | Most distinctive implementation novelty vs the FHE multi-step-NTT line. Need to show no corner-turn buffer exists and quantify the BRAM/latency saved. | **Low** |
+| **G3** | **Fair comparison vs Xing et al. (TC 2025).** | Currently soft ("they stop at 1024"). Re-implement or faithfully model Xing at overlapping N so the scaling claim is a measurement, not an absence of data. | **Medium** |
+| **G4** | **Reframe writeup around the d-depth scaling law.** | Strongest emergent finding; the L×d grid is the DSE evidence. Pure repositioning of existing data. | **Low** |
+| **G5** | **Complete the matrix (d=6, d=7 at L=4).** | Closes the table; extends the depth-scaling curve to d=7. Generator is validated, golden passes — `gen_hier_dN_L4.py 6/7` → sim → synth. | **Low** |
+| **G6** | **Energy + 1 extra device (UltraScale+/Artix).** | Adds an energy axis + generalizability; cheap breadth the original plan already listed. | **Low** |
+
+## 11.4 Phase plan (deliverables · gate · estimate)
+
+**Phase H0 — Housekeeping (½ day).**
+- Commit the working tree (new RTL, generator, golden, vectors, synth script,
+  doc edits). Add `sim/work/*` (compiled vvp binaries) to `.gitignore`.
+- Fix the now-stale `IMPLEMENTATION_DOC.md` §19.5 "Honest summary" (it still
+  says "6 cells / undiagnosed bug / 4–6 weeks").
+- *Gate:* clean `git status`; §19.5 consistent with §19.2.
+
+**Phase H1 — Complete the grid: d=6, d=7 at L=4 (G5). ✅ DONE 2026-05-28.**
+- Generated via `gen_hier_dN_L4.py 6/7`; vectors via `nvar_ntt_model.py`;
+  both PASS 4/4 (incl. random-vs-golden); synthesised on U280.
+- **Results:** d=6 N=4,096 → 2,360 LUT, 4 DSP, 7 BRAM, 222 MHz, 43,429 cyc
+  (proj 43,448, Δ19); d=7 N=16,384 → 2,543 LUT, 4 DSP, 25 BRAM, 222 MHz,
+  197,101 cyc (proj 197,128, Δ27). **Matrix now 13/13.** The L=4 d-sweep
+  (d=3→7) is the headline constant-hardware evidence (LUT +20 % for 256× N).
+
+**Phase H2 — DROPPED (self-built monolithic strawman). Decision 2026-05-28.**
+- We will **not** compare against our own subpar monolithic `ntt_top` (7,306 LUT
+  @ 55.7 MHz — ~5× below a competent iterative design's Fmax). Beating a
+  strawman is not a result; reviewers reject it.
+- We also will **not** build a *competent* monolithic baseline: at F₄'s N≤32 K a
+  good iterative design (Xing [R1]) already beats hierarchical, and a flat
+  N=32 K NTT fits fine on U280 — so the "flat doesn't fit / hier wins" thesis is
+  not winnable here. The competent iterative baseline = **Xing (H4).**
+
+**Phase H3 — Transpose-free + routing-locality evidence (G2). ✅ MOSTLY DONE 2026-05-28.**
+- RTL inspection complete (`IMPLEMENTATION_DOC.md` §19.6): d≥3 family uses 3
+  memories (2 operand + 1 scratch), **no transpose buffer**; `banked_mem`
+  stores N words once; cross-axis "transpose" is pure `rpos`/`rshift` address
+  remapping; scratch is read/written **in-place** (verified) and random-golden
+  PASSes for d=3…7 (functional proof). Interconnect is an **L-wide barrel
+  rotation**, not an L×L crossbar.
+- *Mechanism link:* interconnect width = L and one in-place scratch are both
+  d/N-independent → this is *why* LUT/DSP are flat in d. The measured +20 % LUT
+  across d=3→7 is itself empirical proof of bounded interconnect.
+- *Remaining (optional):* pull post-route max-fanout/net-length numbers from a
+  Vivado `report_design_analysis` run to add a direct routing-locality figure.
+- *Caveat:* the clean 3-memory transpose-free claim is for **d≥3**; Phase C
+  (d=2 L=32) still uses the older 4-memory layout.
+
+**Phase H4 — Xing comparison (G3). ✅ FIRST PASS DONE 2026-05-28 (see `IMPLEMENTATION_DOC.md` §20).**
+- Computed the head-to-head at the N=1024 overlap (`scripts/compare_metrics.py`).
+- **Honest result (no spin):** Xing [R1] **wins every area-time-efficiency
+  metric** — time, LUT-ATP, DSP-ATP, throughput, throughput/DSP, throughput/kLUT.
+  We hold only **lower absolute LUT (2,305 vs 9,783) and DSP (4 vs 16)** — at the
+  cost of ~16× latency. **There is no efficiency-metric win to claim.**
+- Therefore the paper's comparison framing is: *not* "we beat SOTA," but
+  "a competent iterative design dominates at small N; our contribution is the
+  DSE + constant-hardware-in-d scaling law + operation to N=32,768 at the same
+  modulus + the minimal absolute footprint (4 DSP) for area-constrained,
+  latency-tolerant use."
+- *Remaining (optional):* verify Xing's exact numbers against the primary PDF
+  (`docs/VERIFIED_REFERENCES.md` [R1]); extend to N∈{256,512} if Xing reports them.
+
+**Phase H5 — (optional) energy + 2nd device (G6, ~3 days).**
+- Vivado power report for 3 representative cells; re-synth 1–2 cells on an
+  UltraScale+ or Artix part.
+
+**Phase H6 — Paper writeup (G4, ~3–4 weeks). 🚧 FIRST DRAFT STARTED 2026-05-28.**
+- `docs/PAPER_DRAFT.md` — full section skeleton with the real measured tables,
+  the honest §20 comparison framing, verified [R1]/[R2]/[R3] references, and
+  marked **[VERIFY]** / **[FIG]** items. Structure follows §11.5.
+- Remaining: prose expansion, generate Fig.1–4, verify Xing/Kim author lists and
+  numbers against primary PDFs, fill background refs.
+
+**Total to a submittable draft:** ~6–8 weeks (H0–H4 + H6); H5 optional.
+
+## 11.5 Paper structure (v4)
+
+1. **Introduction** — polyMul for lattice crypto; the area-vs-N tension; the
+   F₄ shift-only setting; contributions (the four in §11.1), stated as a DSE +
+   scaling-law study (no algorithm-novelty claim).
+2. **Background** — negacyclic NTT, multi-step Cooley–Tukey, shift-only Fermat
+   butterflies, conflict-free banking. Explicitly cite the prior art for each.
+3. **Architecture** — the shared L-lane datapath; `(Σ iⱼ) mod L` banking +
+   rotation crossbar (the transpose-free claim, G2); the d-level FSM; the
+   `ntt_start` timing discipline (briefly — it's a correctness detail).
+4. **Methodology** — U280, 4.5 ns, golden-model verification, the validated
+   cycle model, the RTL generator (reproducibility).
+5. **Results** — the §11.2 grid + the H1 d=6/7 points; the **constant-in-d /
+   linear-in-L** scaling figures; the shift-only-vs-DSP comparison.
+6. **Comparison** — H2 monolithic-vs-hier crossover on U280; H4 vs Xing.
+7. **Discussion & limitations** — the F₄ N≤32 768 wall (state it plainly); the
+   path past it (CRT / larger Fermat prime) as future work; where each design
+   wins.
+8. **Conclusion.**
+
+## 11.6 What we claim / do NOT claim (v4)
+
+**Claim:** a fully-measured DSE showing (i) constant compute hardware as
+decomposition depth d grows at fixed L (DSP = L exactly), (ii) a complete L×d
+ATP design map over N=64…32 768, (iii) shift-only kernels dominating DSP-based
+ones, and (iv) [pending G2] transpose-free banking.
+
+**Do NOT claim:** any algorithmic novelty in multi-step NTT / FNT / banking;
+**the multivariate Fermat-NTT framing itself** (Kim, Mert et al., CRYPTO 2024,
+eprint 2024/314 — they introduced the univariate→multivariate ring map +
+multiplier-less Fermat NTT; [R2] in `docs/VERIFIED_REFERENCES.md`);
+practicality at N>32 768 under F₄ (retired); lower latency than monolithic
+(it's an area/latency trade — be explicit); fewer LUTs than Xing at small N
+(measurements say otherwise — frame as a different operating point).
+
+## 11.7 Explicitly deferred (future work, not this paper)
+
+- **Break the F₄ wall:** CRT across ≤32 K sub-products, or port to F₅ = 2³²+1.
+  This is the only route to the original large-N story; it is a separate paper
+  and changes the competitive set (FHE accelerators).
+- **Xing-hybrid:** high-radix iterative inner kernel inside the hierarchical
+  outer structure (v3 Branch D). Highest novelty ceiling, ~3 months, separate
+  paper.
+- **Hierarchical communication fabric** (cluster-local banks, staged
+  inter-cluster routing). **Gated, not committed** — see §11.8.
+
+## 11.8 The communication-fabric pivot — gating experiment first
+
+A redesign of the interconnect (cluster-local banks, local routing domains,
+staged inter-cluster communication) is attractive as a narrative but **must
+not be started on rhetoric.** In the current design the rotation crossbar is
+only L-wide and L is hard-capped at 32 (shift-only requires the transform size
+to divide ord₆₅₅₃₇(2) = 32), so the "wide global crossbar" bottleneck the pivot
+targets **cannot grow** within the F₄ shift-only architecture. The only measured
+hint of a communication wall is the Phase E n1M Fmax cliff (222 → ~101 MHz) at
+large physical memory.
+
+**Required gating experiment before committing:** profile the n1M (and n32k)
+implementation timing/congestion reports and identify what actually limits
+Fmax — bank-to-datapath communication vs URAM access vs twiddle-ROM fanout vs
+placement of a large memory.
+- If communication is genuinely the wall → the pivot is justified, with the
+  motivating data and a clean before/after experiment (its own paper).
+- If it is URAM / ROM / placement → the redesign will not help; do not pivot.
+
+Decision deferred until that report is read. **Do not rebuild the fabric on the
+assumption that communication is the bottleneck — let the timing report decide.**
